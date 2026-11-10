@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Admin/Admin.csproj" />
+  <Project Path="Client/Client.csproj" />
+  <Project Path="RemoteAdmin.Shared/RemoteAdmin.Shared.csproj" />
+</Solution>

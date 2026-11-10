@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+release/
+release-final/
+
+# Local runtime data and credentials
+*.secret
+credentials.json
+
+# IDE and OS files
+.vs/
+.vscode/
+*.user
+*.suo
+.DS_Store
