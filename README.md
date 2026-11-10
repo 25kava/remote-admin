@@ -17,4 +17,4 @@ dotnet publish Client\Client.csproj -c Release -r win-x64 --self-contained true 
 
 The repository tracks the final executables with Git LFS, so cloning or pulling the repository materializes `release-final\Admin.exe` and `release-final\Client.exe`. Git LFS must be installed and enabled on the machine performing the clone.
 
-On first Admin startup, a random password is generated for both `25kava` and `25mawa` and printed once to the Admin console. Set `REMOTE_ADMIN_INITIAL_PASSWORD` before first startup to choose it explicitly.
+This prototype intentionally has no login or client authentication. Any client that can reach the Admin LAN port can connect.

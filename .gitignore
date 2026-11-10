@@ -3,9 +3,8 @@ bin/
 obj/
 release/
 
-# Local runtime data and credentials
-*.secret
-credentials.json
+# Local runtime data
+*.log
 
 # IDE and OS files
 .vs/

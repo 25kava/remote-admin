@@ -15,14 +15,13 @@ public static class Protocol
     };
 }
 
-public sealed record DiscoveryAnnouncement(string Host, int Port, string InstanceId, string Secret);
+public sealed record DiscoveryAnnouncement(string Host, int Port, string InstanceId);
 
 public sealed record ClientHello(
     string Type,
     string DeviceId,
     string ComputerName,
     string UserName,
-    string Secret,
     string IpAddress);
 
 public sealed record ServerHello(string Type, bool Accepted, string? Message);

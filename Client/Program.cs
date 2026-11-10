@@ -9,6 +9,9 @@ using RemoteAdmin.Shared;
 
 var appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAdmin");
 Directory.CreateDirectory(appData);
+var logPath = Path.Combine(appData, "Client.log");
+ClientLog.Path = logPath;
+ClientLog.Write("Client started.");
 var deviceIdPath = Path.Combine(appData, "device.id");
 var deviceId = File.Exists(deviceIdPath) ? File.ReadAllText(deviceIdPath) : Guid.NewGuid().ToString("N");
 File.WriteAllText(deviceIdPath, deviceId);
@@ -20,17 +23,19 @@ while (!stopping.IsCancellationRequested)
 {
     try
     {
+        ClientLog.Write("Sending discovery broadcast.");
         var servers = await DiscoverServers(stopping.Token);
+        ClientLog.Write($"Discovery found {servers.Count} Admin instance(s).");
         await Task.WhenAll(servers.Select(async server =>
         {
-            try { await Connect(server, deviceId, server.Secret, stopping.Token); }
+            try { await Connect(server, deviceId, stopping.Token); }
             catch (OperationCanceledException) { }
-            catch { }
+            catch (Exception ex) { ClientLog.Write($"Connection to {server.Host}:{server.Port} failed: {ex.Message}"); }
         }));
         await Task.Delay(TimeSpan.FromSeconds(5), stopping.Token);
     }
     catch (OperationCanceledException) { }
-    catch { await Task.Delay(3000, stopping.Token); }
+    catch (Exception ex) { ClientLog.Write($"Main loop error: {ex}"); await Task.Delay(3000, stopping.Token); }
 }
 
 static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken token)
@@ -45,24 +50,30 @@ static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken
     {
         try
         {
-            var packet = await udp.ReceiveAsync(token);
+            var receiveTask = udp.ReceiveAsync(token).AsTask();
+            if (await Task.WhenAny(receiveTask, Task.Delay(250, token)) != receiveTask) break;
+            var packet = await receiveTask;
+            ClientLog.Write($"Received discovery response from {packet.RemoteEndPoint}.");
             var server = JsonSerializer.Deserialize<DiscoveryAnnouncement>(packet.Buffer, Protocol.Json);
-            if (server is not null && result.All(x => x.InstanceId != server.InstanceId)) result.Add(server);
+            if (server is not null && result.All(x => x.InstanceId != server.InstanceId))
+                result.Add(server with { Host = packet.RemoteEndPoint.Address.ToString() });
         }
-        catch (SocketException) { break; }
+        catch (SocketException ex) { ClientLog.Write($"Discovery socket error: {ex.Message}"); break; }
         catch (OperationCanceledException) { break; }
     }
     return result;
 }
 
-static async Task Connect(DiscoveryAnnouncement server, string deviceId, string secret, CancellationToken token)
+static async Task Connect(DiscoveryAnnouncement server, string deviceId, CancellationToken token)
 {
     using var socket = new ClientWebSocket();
+    ClientLog.Write($"Connecting to {server.Host}:{server.Port}.");
     await socket.ConnectAsync(new Uri($"ws://{server.Host}:{server.Port}/client"), token);
-    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, secret, GetLocalIp());
+    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp());
     await Send(socket, hello, token);
     var response = await Receive<ServerHello>(socket, token);
     if (response is null || !response.Accepted) return;
+    ClientLog.Write($"Connected to Admin {server.InstanceId}.");
     using var terminal = new TerminalManager();
     var statsTask = Task.Run(async () => { while (socket.State == WebSocketState.Open && !token.IsCancellationRequested) { await Send(socket, new { type = "stats", payload = CollectStats() }, token); await Task.Delay(5000, token); } }, token);
     var inputBlocker = new InputBlocker();
@@ -183,4 +194,10 @@ sealed class InputBlocker : IDisposable
 static class InputInjector
 {
     public static void Apply(InputEvent e) { }
+}
+
+static class ClientLog
+{
+    public static string Path { get; set; } = "Client.log";
+    public static void Write(string message) => File.AppendAllText(Path, $"{DateTime.Now:O} {message}{Environment.NewLine}");
 }
