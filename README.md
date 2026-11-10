@@ -15,6 +15,6 @@ dotnet publish Admin\Admin.csproj -c Release -r win-x64 --self-contained true /p
 dotnet publish Client\Client.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o release\Client
 ```
 
-The published directories contain the two runnable single-file executables. The local `release-final` directory is intentionally excluded from source control because the binaries exceed normal GitHub file-size limits.
+The repository tracks the final executables with Git LFS, so cloning or pulling the repository materializes `release-final\Admin.exe` and `release-final\Client.exe`. Git LFS must be installed and enabled on the machine performing the clone.
 
 On first Admin startup, a random password is generated for both `25kava` and `25mawa` and printed once to the Admin console. Set `REMOTE_ADMIN_INITIAL_PASSWORD` before first startup to choose it explicitly.

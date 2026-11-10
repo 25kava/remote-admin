@@ -2,7 +2,6 @@
 bin/
 obj/
 release/
-release-final/
 
 # Local runtime data and credentials
 *.secret
