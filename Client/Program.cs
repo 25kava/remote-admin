@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -148,10 +149,9 @@ static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalMa
 static SystemStats CollectStats()
 {
     var drive = new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory)!);
-    var mem = GC.GetGCMemoryInfo();
-    using var process = Process.GetCurrentProcess();
     var ip = GetLocalIp();
-    return new SystemStats(0, mem.TotalAvailableMemoryBytes == 0 ? 0 : (1 - (double)mem.TotalAvailableMemoryBytes / Math.Max(mem.TotalAvailableMemoryBytes, 1)) * 100, drive.AvailableFreeSpace, drive.TotalSize, Environment.OSVersion.VersionString, ip, GetBattery(), (long)(Environment.TickCount64 / 1000));
+    var memory = NativeStats.GetMemory();
+    return new SystemStats(NativeStats.GetCpuPercent(), memory.UsedPercent, drive.AvailableFreeSpace, drive.TotalSize, Environment.OSVersion.VersionString, ip, GetBattery(), (long)(Environment.TickCount64 / 1000));
 }
 static int? GetBattery() => null;
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
@@ -200,4 +200,71 @@ static class ClientLog
 {
     public static string Path { get; set; } = "Client.log";
     public static void Write(string message) => File.AppendAllText(Path, $"{DateTime.Now:O} {message}{Environment.NewLine}");
+}
+
+static class NativeStats
+{
+    private static long previousIdle;
+    private static long previousKernel;
+    private static long previousUser;
+    private static bool hasCpuSample;
+
+    public static double GetCpuPercent()
+    {
+        if (!GetSystemTimes(out var idle, out var kernel, out var user)) return 0;
+        var idleTicks = ToInt64(idle);
+        var kernelTicks = ToInt64(kernel);
+        var userTicks = ToInt64(user);
+        if (!hasCpuSample)
+        {
+            previousIdle = idleTicks;
+            previousKernel = kernelTicks;
+            previousUser = userTicks;
+            hasCpuSample = true;
+            return 0;
+        }
+        var idleDelta = idleTicks - previousIdle;
+        var totalDelta = (kernelTicks - previousKernel) + (userTicks - previousUser);
+        previousIdle = idleTicks;
+        previousKernel = kernelTicks;
+        previousUser = userTicks;
+        return totalDelta <= 0 ? 0 : Math.Clamp((1d - (double)idleDelta / totalDelta) * 100d, 0, 100);
+    }
+
+    public static (double UsedPercent, long TotalBytes, long AvailableBytes) GetMemory()
+    {
+        var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+        if (!GlobalMemoryStatusEx(ref status)) return (0, 0, 0);
+        var used = status.TotalPhysicalMemory - status.AvailablePhysicalMemory;
+        return (status.TotalPhysicalMemory == 0 ? 0 : (double)used / status.TotalPhysicalMemory * 100, (long)status.TotalPhysicalMemory, (long)status.AvailablePhysicalMemory);
+    }
+
+    private static long ToInt64(FileTime value) => ((long)value.High << 32) | value.Low;
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GetSystemTimes(out FileTime idle, out FileTime kernel, out FileTime user);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx status);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public uint Low;
+        public int High;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryStatusEx
+    {
+        public uint Length;
+        public uint MemoryLoad;
+        public ulong TotalPhysicalMemory;
+        public ulong AvailablePhysicalMemory;
+        public ulong TotalPageFile;
+        public ulong AvailablePageFile;
+        public ulong TotalVirtual;
+        public ulong AvailableVirtual;
+        public ulong AvailableExtendedVirtual;
+    }
 }
