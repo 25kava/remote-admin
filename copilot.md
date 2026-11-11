@@ -40,12 +40,14 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Uses a mutex to prevent duplicate local instances.
 - Writes its device ID and logs under `%LOCALAPPDATA%\RemoteAdmin\`.
 - Registers or updates `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\RemoteAdminClient`.
+- Ensures its outbound LAN firewall rules for UDP 38991 and TCP 38992 on first run, requesting UAC approval when needed.
 - Sends statistics approximately every five seconds.
 
 `Admin.exe`:
 
 - Opens the localhost dashboard automatically.
 - Accepts client WebSocket connections and maintains device status.
+- Ensures inbound LAN firewall rules for UDP 38991 and TCP 38992 on first run, requesting UAC approval when needed.
 - Serves a dark dashboard with device list and terminal/session controls.
 - Writes technical logs under `%LOCALAPPDATA%\RemoteAdmin\Admin\`.
 

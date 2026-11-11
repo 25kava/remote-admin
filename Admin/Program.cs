@@ -12,6 +12,9 @@ Directory.CreateDirectory(dataDir);
 var devices = new ConcurrentDictionary<string, DeviceSnapshot>();
 var logPath = Path.Combine(dataDir, "Admin.log");
 void Log(string message) => File.AppendAllText(logPath, $"{DateTime.Now:O} {message}{Environment.NewLine}");
+if (FirewallSetup.HandleElevatedCommand(args, Environment.ProcessPath!, Log))
+    return;
+FirewallSetup.EnsureAdmin(Environment.ProcessPath!, Log);
 Log("Admin started.");
 var connections = new ConcurrentDictionary<string, WebSocket>();
 var clientSendGates = new ConcurrentDictionary<string, SemaphoreSlim>();
