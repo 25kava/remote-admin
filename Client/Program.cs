@@ -63,6 +63,8 @@ ClientLog.Write("Client started.");
 var deviceIdPath = Path.Combine(appData, "device.id");
 var deviceId = File.Exists(deviceIdPath) ? File.ReadAllText(deviceIdPath) : Guid.NewGuid().ToString("N");
 File.WriteAllText(deviceIdPath, deviceId);
+var notesPath = Path.Combine(appData, "system-notes.txt");
+if (!File.Exists(notesPath)) File.WriteAllText(notesPath, "");
 var stopping = new CancellationTokenSource();
 _ = Task.Run(() => StartupRegistration(appData));
 while (!stopping.IsCancellationRequested)
@@ -74,7 +76,7 @@ while (!stopping.IsCancellationRequested)
         ClientLog.Write($"Discovery found {servers.Count} Admin instance(s).");
         await Task.WhenAll(servers.Select(async server =>
         {
-            try { await Connect(server, deviceId, stopping.Token); }
+            try { await Connect(server, deviceId, notesPath, stopping.Token); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { ClientLog.Write($"Connection to {server.Host}:{server.Port} failed: {ex.Message}"); }
         }));
@@ -155,7 +157,7 @@ static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken
     return result;
 }
 
-static async Task Connect(DiscoveryAnnouncement server, string deviceId, CancellationToken token)
+static async Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
 {
     using var socket = new ClientWebSocket();
     using var sendGate = new SemaphoreSlim(1, 1);
@@ -168,6 +170,7 @@ static async Task Connect(DiscoveryAnnouncement server, string deviceId, Cancell
     ClientLog.Write($"Connected to Admin {server.InstanceId}.");
     using var terminal = new TerminalManager(socket, sendGate);
     await terminal.Start(new("cmd", null), token);
+    await Send(socket, new { type = "notesState", payload = new ClientNotes(ReadNotes(notesPath)) }, sendGate, token);
     var statsTask = Task.Run(async () => { while (socket.State == WebSocketState.Open && !token.IsCancellationRequested) { await Send(socket, new { type = "stats", payload = CollectStats() }, sendGate, token); await Task.Delay(5000, token); } }, token);
     var inputBlocker = new InputBlocker();
     try
@@ -176,13 +179,13 @@ static async Task Connect(DiscoveryAnnouncement server, string deviceId, Cancell
         {
             var message = await Receive<JsonElement>(socket, token);
             if (message.ValueKind == JsonValueKind.Undefined) break;
-            await Handle(message, socket, terminal, inputBlocker, sendGate, token);
+            await Handle(message, socket, terminal, inputBlocker, sendGate, notesPath, token);
         }
     }
     finally { inputBlocker.Dispose(); }
 }
 
-static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, SemaphoreSlim sendGate, CancellationToken token)
+static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
 {
     try
     {
@@ -194,6 +197,14 @@ static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalMa
         }
         else if (type == "terminalRestart")
             await terminal.Start(new("cmd", null), token);
+        else if (type == "notesGet")
+            await Send(socket, new { type = "notesState", payload = new ClientNotes(ReadNotes(notesPath)) }, sendGate, token);
+        else if (type == "notesSet")
+        {
+            var text = message.GetProperty("payload").GetProperty("text").GetString() ?? "";
+            WriteNotes(notesPath, text);
+            await Send(socket, new { type = "notesState", payload = new ClientNotes(text) }, sendGate, token);
+        }
         else if (type == "controlStart") blocker.Enable();
         else if (type == "controlStop") blocker.Disable();
         else if (type == "controlInput") InputInjector.Apply(message.GetProperty("payload").Deserialize<InputEvent>(Protocol.Json)!);
@@ -261,6 +272,8 @@ static SystemStats CollectStats()
 }
 static int? GetBattery() => null;
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
+static string ReadNotes(string path) => File.Exists(path) ? File.ReadAllText(path) : "";
+static void WriteNotes(string path, string text) => File.WriteAllText(path, text);
 static IEnumerable<IPAddress> GetBroadcastAddresses()
 {
     foreach (var network in NetworkInterface.GetAllNetworkInterfaces())

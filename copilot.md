@@ -26,7 +26,7 @@ The solution file is `RemoteAdmin.slnx`.
 - Client discovery is broadcast-based and does not use hardcoded Admin IP addresses.
 - Authentication, pairing, shared secrets, and trust verification were intentionally removed for this prototype. Any reachable LAN client can connect. Discovery uses interface-specific IPv4 broadcasts plus the universal broadcast.
 
-The Admin responds to discovery with its LAN address, WebSocket port, and instance ID. The Client connects to every discovered Admin instance and reconnects after failures. Admin persists each device in `%LOCALAPPDATA%\RemoteAdmin\Admin\devices.json`.
+The Admin responds to discovery with its LAN address, WebSocket port, and instance ID. The Client connects to every discovered Admin instance and reconnects after failures. The Admin only keeps active connections in memory; disconnected devices are not retained. Each Client stores notes in `%LOCALAPPDATA%\RemoteAdmin\system-notes.txt`.
 
 ## Runtime behavior
 
@@ -71,7 +71,8 @@ git lfs pull
 ## Current implemented functionality
 
 - LAN Admin discovery and reconnect.
-- Device registry, names, status, IP address, and persistence.
+- Active device list, names, status, and IP address.
+- Client-hosted system notes editable from the Admin dashboard.
 - Localhost dashboard.
 - Live CPU and RAM statistics using Windows APIs.
 - Disk capacity/free space, Windows version, IP address, and uptime reporting.

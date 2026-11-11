@@ -9,8 +9,7 @@ using RemoteAdmin.Shared;
 
 var dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAdmin", "Admin");
 Directory.CreateDirectory(dataDir);
-var registryPath = Path.Combine(dataDir, "devices.json");
-var devices = LoadRegistry(registryPath);
+var devices = new ConcurrentDictionary<string, DeviceSnapshot>();
 var logPath = Path.Combine(dataDir, "Admin.log");
 void Log(string message) => File.AppendAllText(logPath, $"{DateTime.Now:O} {message}{Environment.NewLine}");
 Log("Admin started.");
@@ -36,14 +35,12 @@ app.MapPost("/api/devices/{id}/name", async (string id, HttpRequest request) =>
     var body = await JsonSerializer.DeserializeAsync<NameRequest>(request.Body, Protocol.Json);
     if (body is null || !devices.TryGetValue(id, out var old)) return Results.BadRequest();
     devices[id] = old with { DisplayName = string.IsNullOrWhiteSpace(body.Name) ? old.ComputerName : body.Name };
-    SaveRegistry(registryPath, devices);
     return Results.Ok(devices[id]);
 });
 app.MapDelete("/api/devices/{id}", (string id) =>
 {
     devices.TryRemove(id, out _);
     if (connections.TryRemove(id, out var socket)) _ = socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Removed", CancellationToken.None);
-    SaveRegistry(registryPath, devices);
     return Results.Ok();
 });
 app.MapGet("/ws/{id}", async (string id, HttpContext context) =>
@@ -77,9 +74,8 @@ app.Map("/client", async context =>
     var hello = await ReceiveJson<ClientHello>(clientSocket, context.RequestAborted);
     if (hello is null) return;
     Log($"Client connected: {hello.ComputerName} ({hello.DeviceId}) from {hello.IpAddress}.");
-    var snapshot = devices.GetOrAdd(hello.DeviceId, _ => new DeviceSnapshot(hello.DeviceId, hello.ComputerName, hello.ComputerName, "Connected", DateTime.UtcNow, hello.IpAddress, null));
-    devices[hello.DeviceId] = snapshot with { ComputerName = hello.ComputerName, Status = "Connected", LastSeenUtc = DateTime.UtcNow, IpAddress = hello.IpAddress };
-    SaveRegistry(registryPath, devices);
+    var snapshot = new DeviceSnapshot(hello.DeviceId, hello.ComputerName, hello.ComputerName, "Connected", DateTime.UtcNow, hello.IpAddress, null);
+    devices[hello.DeviceId] = snapshot;
     connections[hello.DeviceId] = clientSocket;
     var sendGate = clientSendGates.GetOrAdd(hello.DeviceId, _ => new SemaphoreSlim(1, 1));
     await SendJson(clientSocket, new ServerHello("serverHello", null), sendGate, context.RequestAborted);
@@ -103,8 +99,7 @@ app.Map("/client", async context =>
         connections.TryRemove(hello.DeviceId, out _);
         if (clientSendGates.TryRemove(hello.DeviceId, out var gate)) gate.Dispose();
         Log($"Client disconnected: {hello.ComputerName} ({hello.DeviceId}).");
-        if (devices.TryGetValue(hello.DeviceId, out var current)) devices[hello.DeviceId] = current with { Status = "Disconnected", LastSeenUtc = DateTime.UtcNow };
-        SaveRegistry(registryPath, devices);
+        devices.TryRemove(hello.DeviceId, out _);
     }
 });
 
@@ -138,17 +133,12 @@ async Task RegistryHeartbeat(CancellationToken stop)
     {
         foreach (var pair in devices)
             if (pair.Value.Status == "Connected" && !connections.ContainsKey(pair.Key))
-                devices[pair.Key] = pair.Value with { Status = "Disconnected" };
-        SaveRegistry(registryPath, devices);
+                devices.TryRemove(pair.Key, out _);
         await Task.Delay(TimeSpan.FromSeconds(5), stop);
     }
 }
 
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
-static ConcurrentDictionary<string, DeviceSnapshot> LoadRegistry(string path) => File.Exists(path)
-    ? JsonSerializer.Deserialize<ConcurrentDictionary<string, DeviceSnapshot>>(File.ReadAllText(path), Protocol.Json) ?? new()
-    : new();
-static void SaveRegistry(string path, ConcurrentDictionary<string, DeviceSnapshot> value) => File.WriteAllText(path, JsonSerializer.Serialize(value, Protocol.Json));
 static bool TryGetStats(string json, out SystemStats? stats) { stats = null; try { var envelope = JsonSerializer.Deserialize<JsonElement>(json, Protocol.Json); if (envelope.GetProperty("type").GetString() == "stats") { stats = envelope.GetProperty("payload").Deserialize<SystemStats>(Protocol.Json); return stats is not null; } } catch { } return false; }
 static async Task<T?> ReceiveJson<T>(WebSocket socket, CancellationToken cancellationToken)
 {
