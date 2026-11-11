@@ -21,14 +21,6 @@ This prototype intentionally has no login, pairing, trust verification, or clien
 
 The Admin only lists currently connected clients; disconnected clients are not retained. Each client stores its system notes in `%LOCALAPPDATA%\RemoteAdmin\system-notes.txt`, and the Admin dashboard can read and update those notes.
 
-If Windows Firewall previously blocked Admin, run this from the repository folder:
-
-```powershell
-.\repair-firewall.ps1
-```
-
-The script requests administrator permission through UAC automatically. Approve that prompt. It removes old blocking `Admin.exe` rules and creates allow rules for Admin inbound UDP `38991` discovery and TCP `38992` client connections, plus Client outbound UDP `38991` discovery and TCP `38992` connections, on Domain, Private, and Public networks. Run it on both PCs.
-
 The published `Admin.exe` and `Client.exe` also perform this firewall setup automatically on first run. Windows may show one UAC prompt; approve it once. `Client.exe` can then run by itself without requiring `Admin.exe` to be started first.
 
 When `Client.exe` is started from outside `%LOCALAPPDATA%\RemoteAdmin`, it copies itself to `%LOCALAPPDATA%\RemoteAdmin\Client.exe` and starts that copy. The current development build preserves the original executable; the final build should remove it after handoff.
