@@ -26,6 +26,10 @@ try {
         Remove-NetFirewallRule -ErrorAction Stop
     Get-NetFirewallRule -DisplayName "Remote Admin - Client connections (TCP 38992)" -ErrorAction SilentlyContinue |
         Remove-NetFirewallRule -ErrorAction Stop
+    Get-NetFirewallRule -DisplayName "Remote Admin Client - WebSocket outbound (TCP 38992)" -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction Stop
+    Get-NetFirewallRule -DisplayName "Remote Admin Client - Discovery outbound (UDP 38991)" -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction Stop
 
     New-NetFirewallRule `
         -DisplayName "Remote Admin - Discovery (UDP 38991)" `
@@ -49,8 +53,43 @@ try {
         -Enabled True `
         -ErrorAction Stop | Out-Null
 
-    $expected = Get-NetFirewallRule -DisplayName "Remote Admin - Discovery (UDP 38991)", "Remote Admin - Client connections (TCP 38992)" -ErrorAction Stop
-    if (@($expected).Count -ne 2 -or @($expected | Where-Object { $_.Action -ne "Allow" -or $_.Enabled -ne "True" }).Count -ne 0) {
+    $clientPath = Join-Path $env:LOCALAPPDATA "RemoteAdmin\Client.exe"
+    if (-not (Test-Path $clientPath)) {
+        $clientPath = Join-Path $PSScriptRoot "release-final\Client.exe"
+    }
+    if (-not (Test-Path $clientPath)) {
+        throw "Client.exe was not found in LocalAppData or release-final."
+    }
+
+    New-NetFirewallRule `
+        -DisplayName "Remote Admin Client - WebSocket outbound (TCP 38992)" `
+        -Direction Outbound `
+        -Action Allow `
+        -Protocol TCP `
+        -RemotePort 38992 `
+        -Program $clientPath `
+        -Profile Domain,Private,Public `
+        -Enabled True `
+        -ErrorAction Stop | Out-Null
+
+    New-NetFirewallRule `
+        -DisplayName "Remote Admin Client - Discovery outbound (UDP 38991)" `
+        -Direction Outbound `
+        -Action Allow `
+        -Protocol UDP `
+        -RemotePort 38991 `
+        -Program $clientPath `
+        -Profile Domain,Private,Public `
+        -Enabled True `
+        -ErrorAction Stop | Out-Null
+
+    $expected = Get-NetFirewallRule -DisplayName `
+        "Remote Admin - Discovery (UDP 38991)", `
+        "Remote Admin - Client connections (TCP 38992)", `
+        "Remote Admin Client - WebSocket outbound (TCP 38992)", `
+        "Remote Admin Client - Discovery outbound (UDP 38991)" `
+        -ErrorAction Stop
+    if (@($expected).Count -ne 4 -or @($expected | Where-Object { $_.Action -ne "Allow" -or $_.Enabled -ne "True" }).Count -ne 0) {
         throw "Firewall rules were not created in the expected enabled/allow state."
     }
 
