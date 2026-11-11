@@ -23,11 +23,23 @@ The Admin only lists currently connected clients; disconnected clients are not r
 
 The published `Admin.exe` performs its inbound firewall setup automatically on first run and may show one UAC prompt. `Client.exe` only makes outbound UDP/TCP connections, so it does not configure firewall rules, request elevation, or require administrator privileges.
 
-### Client discovery reliability fix
+### Communication reliability
 
-The client remains a single self-contained, plug-and-play executable. Its discovery socket now waits for the complete response window instead of stopping after a fixed 250 ms with no packet. This prevents normal LAN latency, Wi-Fi broadcast delays, and Windows firewall inspection from causing a valid Admin response to be discarded.
+Discovery runs continuously, including while connected to other Admin instances. Each Admin has an independent connection task, so one healthy connection cannot block discovery or reconnecting to another Admin. Alternate addresses of the same Admin are retained as connection fallbacks.
 
-The Admin also now protects its connection registry from stale WebSocket cleanup. If a client reconnects while its previous connection is still shutting down, the old connection can no longer remove the replacement connection from the device list. The dashboard polls for device changes every 500 ms so a successfully discovered client is shown almost immediately.
+IPv4 broadcast calculation excludes /31, /32, tunnel, loopback and link-local interfaces. Discovery waits for its full response window, ignores malformed replies, and does not abandon valid LAN replies because another destination produces a UDP port-unreachable error. Discovery receives are cancelled and disposed at the end of each window.
+
+WebSocket connection and greeting have a ten-second timeout. Both updated peers use ten-second keepalive intervals and a ten-second Pong timeout to detect silent network failures. The Admin stores each socket and device snapshot as a single entry and removes it only if that exact connection is still current. Closing or refreshing the dashboard cannot tear down the client connection. Existing dashboard sockets resolve the current client connection after a reconnect. Transport logs are serialized, cannot interrupt connections on file-sharing errors, and include disconnect reasons.
+
+Admin firewall checks verify the executable path as well as the rule name, so moving Admin.exe cannot silently reuse a rule for an older path. Ports and protocol records remain unchanged; updated programs interoperate with the previous release.
+
+Communication regression tests run without starting a remote shell or changing startup registration:
+
+```powershell
+dotnet run --project tests/Communication.Tests -c Release
+# Optional: discover an existing LAN Admin and maintain a temporary test session.
+dotnet run --project tests/Communication.Tests -c Release -- --live --soak
+```
 
 The client does not configure inbound or outbound firewall rules and never starts an elevated process. Only the Admin requires inbound firewall access because it listens for discovery and client WebSocket connections.
 

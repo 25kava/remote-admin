@@ -25,7 +25,7 @@ public static class FirewallSetup
 
     private static bool Ensure(string executablePath, string role, string[] ruleNames, Action<string> log)
     {
-        if (ruleNames.All(RuleExists))
+        if (ruleNames.All(name => RuleTargetsProgram(name, executablePath)))
             return true;
 
         if (!IsAdministrator())
@@ -42,7 +42,7 @@ public static class FirewallSetup
                     WorkingDirectory = AppContext.BaseDirectory
                 });
                 process?.WaitForExit();
-                return process?.ExitCode == 0 && ruleNames.All(RuleExists);
+                return process?.ExitCode == 0 && ruleNames.All(name => RuleTargetsProgram(name, executablePath));
             }
             catch (Exception ex)
             {
@@ -79,6 +79,24 @@ public static class FirewallSetup
     }
 
     private static bool RuleExists(string name) => RunNetsh(["advfirewall", "firewall", "show", "rule", "name=" + name], false) == 0;
+
+    private static bool RuleTargetsProgram(string name, string executablePath)
+    {
+        var info = new ProcessStartInfo("netsh.exe")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+        foreach (var argument in new[] { "advfirewall", "firewall", "show", "rule", "name=" + name, "verbose" })
+            info.ArgumentList.Add(argument);
+        using var process = Process.Start(info);
+        if (process is null) return false;
+        var output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        // Named rules may still point at an older copy of Admin.exe after it is moved.
+        return process.ExitCode == 0 && output.Contains(executablePath, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static int RunNetsh(string[] arguments, bool logOutput)
     {

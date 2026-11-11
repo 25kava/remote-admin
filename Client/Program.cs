@@ -2,9 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
-using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using RemoteAdmin.Shared;
@@ -67,24 +65,10 @@ var notesPath = Path.Combine(appData, "system-notes.txt");
 if (!File.Exists(notesPath)) File.WriteAllText(notesPath, "");
 var stopping = new CancellationTokenSource();
 _ = Task.Run(() => StartupRegistration(appData));
-while (!stopping.IsCancellationRequested)
-{
-    try
-    {
-        ClientLog.Write("Sending discovery broadcast.");
-        var servers = await DiscoverServers(stopping.Token);
-        ClientLog.Write($"Discovery found {servers.Count} Admin instance(s).");
-        await Task.WhenAll(servers.Select(async server =>
-        {
-            try { await Connect(server, deviceId, notesPath, stopping.Token); }
-            catch (OperationCanceledException) { }
-            catch (Exception ex) { ClientLog.Write($"Connection to {server.Host}:{server.Port} failed: {ex.Message}"); }
-        }));
-        await Task.Delay(TimeSpan.FromSeconds(5), stopping.Token);
-    }
-    catch (OperationCanceledException) { }
-    catch (Exception ex) { ClientLog.Write($"Main loop error: {ex}"); await Task.Delay(3000, stopping.Token); }
-}
+await ConnectionSupervisor.RunAsync(
+    token => LanDiscovery.FindAsync(ClientLog.Write, token),
+    (server, token) => Connect(server, deviceId, notesPath, token),
+    ClientLog.Write, stopping.Token);
 
 static bool IsUnderDirectory(string? filePath, string directory)
 {
@@ -119,64 +103,42 @@ static bool TryDeleteOriginal(string path)
     }
 }
 
-static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken token)
+static Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
 {
-    using var udp = new UdpClient { EnableBroadcast = true };
-    udp.Client.ReceiveTimeout = 700;
-    var request = Encoding.UTF8.GetBytes(Protocol.DiscoveryRequest);
-    var broadcasts = GetBroadcastAddresses().Append(IPAddress.Broadcast).Distinct().ToList();
-    foreach (var broadcast in broadcasts)
-    {
-        try
-        {
-            await udp.SendAsync(request, request.Length, new IPEndPoint(broadcast, Protocol.DiscoveryPort));
-            ClientLog.Write($"Discovery broadcast sent to {broadcast}.");
-        }
-        catch (SocketException ex)
-        {
-            ClientLog.Write($"Discovery broadcast to {broadcast} failed: {ex.Message}");
-        }
-    }
-    var result = new List<DiscoveryAnnouncement>();
-    var until = DateTime.UtcNow.AddMilliseconds(1200);
-    while (DateTime.UtcNow < until)
-    {
-        try
-        {
-            var receiveTask = udp.ReceiveAsync(token).AsTask();
-            var remaining = until - DateTime.UtcNow;
-            if (remaining <= TimeSpan.Zero) break;
-            if (await Task.WhenAny(receiveTask, Task.Delay(remaining, token)) != receiveTask) break;
-            var packet = await receiveTask;
-            ClientLog.Write($"Received discovery response from {packet.RemoteEndPoint}.");
-            var server = JsonSerializer.Deserialize<DiscoveryAnnouncement>(packet.Buffer, Protocol.Json);
-            if (server is not null && result.All(x => x.InstanceId != server.InstanceId))
-                result.Add(server with { Host = packet.RemoteEndPoint.Address.ToString() });
-        }
-        catch (SocketException ex) { ClientLog.Write($"Discovery socket error: {ex.Message}"); break; }
-        catch (OperationCanceledException) { break; }
-    }
-    return result;
+    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp());
+    return ClientTransport.RunAsync(server, hello,
+        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, sessionToken), ClientLog.Write, token);
 }
 
-static async Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
+static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
 {
-    using var socket = new ClientWebSocket();
-    using var sendGate = new SemaphoreSlim(1, 1);
-    ClientLog.Write($"Connecting to {server.Host}:{server.Port}.");
-    await socket.ConnectAsync(new Uri($"ws://{server.Host}:{server.Port}/client"), token);
-    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp());
-    await Send(socket, hello, sendGate, token);
-    var response = await Receive<ServerHello>(socket, token);
-    if (response is null) return;
-    ClientLog.Write($"Connected to Admin {server.InstanceId}.");
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+    token = lifetime.Token;
     using var terminal = new TerminalManager(socket, sendGate);
-    await terminal.Start(new("cmd", null), token);
-    await Send(socket, new { type = "notesState", payload = new ClientNotes(ReadNotes(notesPath)) }, sendGate, token);
-    var statsTask = Task.Run(async () => { while (socket.State == WebSocketState.Open && !token.IsCancellationRequested) { await Send(socket, new { type = "stats", payload = CollectStats() }, sendGate, token); await Task.Delay(5000, token); } }, token);
-    var inputBlocker = new InputBlocker();
+    using var inputBlocker = new InputBlocker();
+    Task statsTask = Task.CompletedTask;
     try
     {
+        await terminal.Start(new("cmd", null), token);
+        await Send(socket, new { type = "notesState", payload = new ClientNotes(ReadNotes(notesPath)) }, sendGate, token);
+        statsTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    await Send(socket, new { type = "stats", payload = CollectStats() }, sendGate, token);
+                    await Task.Delay(5000, token);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                ClientLog.Write($"Statistics connection failed: {ex.Message}");
+                lifetime.Cancel();
+                socket.Abort();
+            }
+        }, token);
         while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
         {
             var message = await Receive<JsonElement>(socket, token);
@@ -184,7 +146,13 @@ static async Task Connect(DiscoveryAnnouncement server, string deviceId, string 
             await Handle(message, socket, terminal, inputBlocker, sendGate, notesPath, token);
         }
     }
-    finally { inputBlocker.Dispose(); }
+    finally
+    {
+        await lifetime.CancelAsync();
+        socket.Abort();
+        try { await statsTask; }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
 }
 
 static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
@@ -276,26 +244,6 @@ static int? GetBattery() => null;
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
 static string ReadNotes(string path) => File.Exists(path) ? File.ReadAllText(path) : "";
 static void WriteNotes(string path, string text) => File.WriteAllText(path, text);
-static IEnumerable<IPAddress> GetBroadcastAddresses()
-{
-    foreach (var network in NetworkInterface.GetAllNetworkInterfaces())
-    {
-        if (network.OperationalStatus != OperationalStatus.Up ||
-            network.NetworkInterfaceType == NetworkInterfaceType.Loopback)
-            continue;
-
-        foreach (var address in network.GetIPProperties().UnicastAddresses)
-        {
-            if (address.Address.AddressFamily != AddressFamily.InterNetwork || address.IPv4Mask is null)
-                continue;
-
-            var ip = BitConverter.ToUInt32(address.Address.GetAddressBytes().Reverse().ToArray());
-            var mask = BitConverter.ToUInt32(address.IPv4Mask.GetAddressBytes().Reverse().ToArray());
-            var broadcast = (ip & mask) | ~mask;
-            yield return new IPAddress(BitConverter.GetBytes(broadcast).Reverse().ToArray());
-        }
-    }
-}
 static async Task Send<T>(ClientWebSocket socket, T value, SemaphoreSlim sendGate, CancellationToken token)
 {
     var data = JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json);
@@ -387,6 +335,7 @@ sealed class TerminalManager : IDisposable
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
+        catch (WebSocketException) { }
     }
     private async Task MonitorExit(Process terminalProcess, CancellationToken token)
     {
@@ -397,6 +346,7 @@ sealed class TerminalManager : IDisposable
         }
         catch (OperationCanceledException) { }
         catch (InvalidOperationException) { }
+        catch (WebSocketException) { }
     }
     private Task Send<T>(T value, CancellationToken token) => ProgramSend(value, token);
     private async Task ProgramSend<T>(T value, CancellationToken token) => await SendMessage(socket, value, sendGate, token);
@@ -426,8 +376,9 @@ static class InputInjector
 
 static class ClientLog
 {
-    public static string Path { get; set; } = "Client.log";
-    public static void Write(string message) => File.AppendAllText(Path, $"{DateTime.Now:O} {message}{Environment.NewLine}");
+    private static CommunicationLog log = new("Client.log");
+    public static string Path { set => log = new CommunicationLog(value); }
+    public static void Write(string message) => log.Write(message);
 }
 
 static class NativeStats

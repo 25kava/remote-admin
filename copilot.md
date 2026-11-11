@@ -42,7 +42,9 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Registers or updates `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\RemoteAdminClient`.
 - Uses only outbound UDP/TCP connections and never requests administrator privileges or configures firewall rules.
 - Sends statistics approximately every five seconds.
-- Discovery waits for the complete response window and can receive all Admin responses instead of abandoning the search after 250 ms.
+- Discovery runs continuously while connected. Each Admin reconnects independently; alternate interfaces are connection fallbacks. /31 and /32 adapters are excluded from broadcast calculation, UDP port-unreachable errors do not abandon the response window, and malformed replies are ignored.
+- WebSocket connection/greeting time out after ten seconds. Transport keepalive uses a ten-second interval and a ten-second Pong timeout. Session statistics tasks are cancelled and observed on disconnect.
+- Communication logging is serialized and cannot break connections when the log file is locked.
 
 `Admin.exe`:
 
@@ -51,7 +53,8 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Ensures inbound LAN firewall rules for UDP 38991 and TCP 38992 on first run, requesting UAC approval when needed.
 - Serves a dark dashboard with device list and terminal/session controls.
 - Writes technical logs under `%LOCALAPPDATA%\RemoteAdmin\Admin\`.
-- Uses identity-aware WebSocket cleanup so an older connection cannot remove a newer reconnect for the same device.
+- Uses DeviceHub to keep each socket, send gate and device snapshot in one connection entry. Atomic conditional removal prevents stale cleanup from removing a reconnect. Browser output failures are isolated from the client; browser input resolves the current connection after a reconnect. Disconnect reasons are logged.
+- Verifies firewall rules reference the current executable path after Admin.exe is moved.
 - Refreshes the dashboard device list every 500 ms so discovered clients appear with minimal UI delay.
 
 ## Build and publish
@@ -104,3 +107,7 @@ Do not add a third runtime executable or an installer unless the project require
 - Preserve the two-executable output model.
 - Do not commit credentials, local runtime state, `bin/`, `obj/`, or ordinary publish directories.
 - Update this file when architecture, protocol ports, executable behavior, or build procedures change.
+
+## Communication tests
+
+Run `dotnet run --project tests/Communication.Tests -c Release` for isolated regression tests of discovery, independent reconnects, fallback addresses, cancellation, logging, concurrent device registration, browser disconnect isolation and silent network failures. Add `-- --live --soak` to discover an existing LAN Admin and maintain a temporary inert test client for 75 seconds. Tests do not start terminals or alter startup registration and are not a third distributed runtime executable.
