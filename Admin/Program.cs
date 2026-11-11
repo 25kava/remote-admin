@@ -15,6 +15,7 @@ var logPath = Path.Combine(dataDir, "Admin.log");
 void Log(string message) => File.AppendAllText(logPath, $"{DateTime.Now:O} {message}{Environment.NewLine}");
 Log("Admin started.");
 var connections = new ConcurrentDictionary<string, WebSocket>();
+var clientSendGates = new ConcurrentDictionary<string, SemaphoreSlim>();
 var browserConnections = new ConcurrentDictionary<string, ConcurrentDictionary<Guid, WebSocket>>();
 var instanceId = Guid.NewGuid().ToString("N");
 var builder = WebApplication.CreateBuilder(args);
@@ -55,12 +56,12 @@ app.MapGet("/ws/{id}", async (string id, HttpContext context) =>
     peers[browserId] = browser;
     try
     {
-        var buffer = new byte[128 * 1024];
         while (browser.State == WebSocketState.Open && socket.State == WebSocketState.Open)
         {
-            var result = await browser.ReceiveAsync(buffer, context.RequestAborted);
-            if (result.MessageType == WebSocketMessageType.Close) break;
-            await socket.SendAsync(buffer.AsMemory(0, result.Count), WebSocketMessageType.Text, result.EndOfMessage, context.RequestAborted);
+            var message = await ReceiveMessage(browser, context.RequestAborted);
+            if (message is null) break;
+            if (clientSendGates.TryGetValue(id, out var sendGate))
+                await SendRaw(socket, message, sendGate, context.RequestAborted);
         }
     }
     finally
@@ -80,27 +81,27 @@ app.Map("/client", async context =>
     devices[hello.DeviceId] = snapshot with { ComputerName = hello.ComputerName, Status = "Connected", LastSeenUtc = DateTime.UtcNow, IpAddress = hello.IpAddress };
     SaveRegistry(registryPath, devices);
     connections[hello.DeviceId] = clientSocket;
-    await SendJson(clientSocket, new ServerHello("serverHello", true, null), context.RequestAborted);
+    var sendGate = clientSendGates.GetOrAdd(hello.DeviceId, _ => new SemaphoreSlim(1, 1));
+    await SendJson(clientSocket, new ServerHello("serverHello", true, null), sendGate, context.RequestAborted);
     try
     {
-        var buffer = new byte[256 * 1024];
         while (clientSocket.State == WebSocketState.Open)
         {
-            var result = await clientSocket.ReceiveAsync(buffer, context.RequestAborted);
-            if (result.MessageType == WebSocketMessageType.Close) break;
-            if (result.MessageType != WebSocketMessageType.Text) continue;
-            var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+            var data = await ReceiveMessage(clientSocket, context.RequestAborted);
+            if (data is null) break;
+            var json = Encoding.UTF8.GetString(data);
             if (TryGetStats(json, out var stats))
                 devices[hello.DeviceId] = devices[hello.DeviceId] with { Stats = stats, LastSeenUtc = DateTime.UtcNow };
             if (browserConnections.TryGetValue(hello.DeviceId, out var browsers))
                 foreach (var browser in browsers.Values.Where(x => x.State == WebSocketState.Open))
-                    await browser.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None);
+                    await browser.SendAsync(data, WebSocketMessageType.Text, true, CancellationToken.None);
         }
     }
     catch (OperationCanceledException) { }
     finally
     {
         connections.TryRemove(hello.DeviceId, out _);
+        if (clientSendGates.TryRemove(hello.DeviceId, out var gate)) gate.Dispose();
         Log($"Client disconnected: {hello.ComputerName} ({hello.DeviceId}).");
         if (devices.TryGetValue(hello.DeviceId, out var current)) devices[hello.DeviceId] = current with { Status = "Disconnected", LastSeenUtc = DateTime.UtcNow };
         SaveRegistry(registryPath, devices);
@@ -149,8 +150,32 @@ static ConcurrentDictionary<string, DeviceSnapshot> LoadRegistry(string path) =>
     : new();
 static void SaveRegistry(string path, ConcurrentDictionary<string, DeviceSnapshot> value) => File.WriteAllText(path, JsonSerializer.Serialize(value, Protocol.Json));
 static bool TryGetStats(string json, out SystemStats? stats) { stats = null; try { var envelope = JsonSerializer.Deserialize<JsonElement>(json, Protocol.Json); if (envelope.GetProperty("type").GetString() == "stats") { stats = envelope.GetProperty("payload").Deserialize<SystemStats>(Protocol.Json); return stats is not null; } } catch { } return false; }
-static async Task<T?> ReceiveJson<T>(WebSocket socket, CancellationToken cancellationToken) { var buffer = new byte[64 * 1024]; var result = await socket.ReceiveAsync(buffer, cancellationToken); return JsonSerializer.Deserialize<T>(buffer.AsSpan(0, result.Count), Protocol.Json); }
-static Task SendJson<T>(WebSocket socket, T value, CancellationToken cancellationToken) => socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json), WebSocketMessageType.Text, true, cancellationToken);
+static async Task<T?> ReceiveJson<T>(WebSocket socket, CancellationToken cancellationToken)
+{
+    var data = await ReceiveMessage(socket, cancellationToken);
+    return data is null ? default : JsonSerializer.Deserialize<T>(data, Protocol.Json);
+}
+static async Task<byte[]?> ReceiveMessage(WebSocket socket, CancellationToken cancellationToken)
+{
+    using var message = new MemoryStream();
+    var buffer = new byte[64 * 1024];
+    while (true)
+    {
+        var result = await socket.ReceiveAsync(buffer, cancellationToken);
+        if (result.MessageType == WebSocketMessageType.Close) return null;
+        if (result.MessageType != WebSocketMessageType.Text) continue;
+        message.Write(buffer, 0, result.Count);
+        if (result.EndOfMessage) return message.ToArray();
+    }
+}
+static async Task SendJson<T>(WebSocket socket, T value, SemaphoreSlim sendGate, CancellationToken cancellationToken)
+    => await SendRaw(socket, JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json), sendGate, cancellationToken);
+static async Task SendRaw(WebSocket socket, byte[] data, SemaphoreSlim sendGate, CancellationToken cancellationToken)
+{
+    await sendGate.WaitAsync(cancellationToken);
+    try { await socket.SendAsync(data, WebSocketMessageType.Text, true, cancellationToken); }
+    finally { sendGate.Release(); }
+}
 static string ReadDashboard()
 {
     var resource = typeof(Program).Assembly.GetManifestResourceNames().FirstOrDefault(x => x.EndsWith("wwwroot.index.html", StringComparison.OrdinalIgnoreCase));

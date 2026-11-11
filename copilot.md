@@ -33,6 +33,10 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 `Client.exe`:
 
 - Has `OutputType=WinExe`, so it does not open a console window.
+- Relocates itself to `%LOCALAPPDATA%\RemoteAdmin\Client.exe` when started from another directory and starts the relocated copy. The current development build preserves the original executable; the final build should enable removal after handoff.
+- Starts remote terminal sessions in the logged-in user's profile directory by default.
+- Starts one CMD terminal automatically for each Admin connection; the dashboard only provides terminal input and clearing.
+- Restarts the CMD terminal when a device is selected in the dashboard.
 - Uses a mutex to prevent duplicate local instances.
 - Writes its device ID and logs under `%LOCALAPPDATA%\RemoteAdmin\`.
 - Registers or updates `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\RemoteAdminClient`.
@@ -71,7 +75,7 @@ git lfs pull
 - Localhost dashboard.
 - Live CPU and RAM statistics using Windows APIs.
 - Disk capacity/free space, Windows version, IP address, and uptime reporting.
-- PowerShell/CMD terminal process plumbing with streamed output.
+- CMD terminal process plumbing with streamed output.
 - Basic file upload, download, delete, rename, and execution message handlers in the Client.
 - Current-user startup registration.
 - Hidden client console window.

@@ -12,13 +12,57 @@ var appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.L
 Directory.CreateDirectory(appData);
 var logPath = Path.Combine(appData, "Client.log");
 ClientLog.Path = logPath;
+var removeOriginalAfterRelocation = false;
+var relocation = RelocationInfo.Parse(args);
+if (relocation is not null)
+    WaitForParentExit(relocation.ParentProcessId);
+
+using var mutex = new Mutex(false, "RemoteAdmin.Client");
+var ownsMutex = false;
+try
+{
+    ownsMutex = mutex.WaitOne(0);
+}
+catch (AbandonedMutexException)
+{
+    ownsMutex = true;
+}
+
+if (!ownsMutex) return;
+
+if (relocation is not null)
+{
+    if (removeOriginalAfterRelocation)
+    {
+        var originalRemoved = TryDeleteOriginal(relocation.SourcePath);
+        if (!originalRemoved)
+            ClientLog.Write($"Unable to remove the original client executable: {relocation.SourcePath}");
+    }
+}
+else if (!IsUnderDirectory(Environment.ProcessPath, appData))
+{
+    var targetPath = Path.Combine(appData, "Client.exe");
+    File.Copy(Environment.ProcessPath!, targetPath, true);
+    var child = Process.Start(new ProcessStartInfo
+    {
+        FileName = targetPath,
+        Arguments = $"--relocated-from \"{Environment.ProcessPath}\" --parent-pid {Environment.ProcessId}",
+        UseShellExecute = false,
+        CreateNoWindow = true
+    });
+
+    if (child is null)
+        throw new InvalidOperationException("Unable to start the relocated client.");
+
+    mutex.ReleaseMutex();
+    return;
+}
+
 ClientLog.Write("Client started.");
 var deviceIdPath = Path.Combine(appData, "device.id");
 var deviceId = File.Exists(deviceIdPath) ? File.ReadAllText(deviceIdPath) : Guid.NewGuid().ToString("N");
 File.WriteAllText(deviceIdPath, deviceId);
 var stopping = new CancellationTokenSource();
-using var mutex = new Mutex(true, "RemoteAdmin.Client", out var ownsMutex);
-if (!ownsMutex) return;
 _ = Task.Run(() => StartupRegistration(appData));
 while (!stopping.IsCancellationRequested)
 {
@@ -37,6 +81,39 @@ while (!stopping.IsCancellationRequested)
     }
     catch (OperationCanceledException) { }
     catch (Exception ex) { ClientLog.Write($"Main loop error: {ex}"); await Task.Delay(3000, stopping.Token); }
+}
+
+static bool IsUnderDirectory(string? filePath, string directory)
+{
+    if (string.IsNullOrWhiteSpace(filePath)) return false;
+    var file = Path.GetFullPath(filePath);
+    var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+    return file.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+}
+
+static void WaitForParentExit(int processId)
+{
+    try
+    {
+        using var parent = Process.GetProcessById(processId);
+        parent.WaitForExit(TimeSpan.FromSeconds(10));
+    }
+    catch (ArgumentException) { }
+    catch (InvalidOperationException) { }
+}
+
+static bool TryDeleteOriginal(string path)
+{
+    try
+    {
+        if (!File.Exists(path)) return true;
+        File.Delete(path);
+        return !File.Exists(path);
+    }
+    catch
+    {
+        return false;
+    }
 }
 
 static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken token)
@@ -68,15 +145,17 @@ static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken
 static async Task Connect(DiscoveryAnnouncement server, string deviceId, CancellationToken token)
 {
     using var socket = new ClientWebSocket();
+    using var sendGate = new SemaphoreSlim(1, 1);
     ClientLog.Write($"Connecting to {server.Host}:{server.Port}.");
     await socket.ConnectAsync(new Uri($"ws://{server.Host}:{server.Port}/client"), token);
     var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp());
-    await Send(socket, hello, token);
+    await Send(socket, hello, sendGate, token);
     var response = await Receive<ServerHello>(socket, token);
     if (response is null || !response.Accepted) return;
     ClientLog.Write($"Connected to Admin {server.InstanceId}.");
-    using var terminal = new TerminalManager();
-    var statsTask = Task.Run(async () => { while (socket.State == WebSocketState.Open && !token.IsCancellationRequested) { await Send(socket, new { type = "stats", payload = CollectStats() }, token); await Task.Delay(5000, token); } }, token);
+    using var terminal = new TerminalManager(socket, sendGate);
+    await terminal.Start(new("cmd", null), token);
+    var statsTask = Task.Run(async () => { while (socket.State == WebSocketState.Open && !token.IsCancellationRequested) { await Send(socket, new { type = "stats", payload = CollectStats() }, sendGate, token); await Task.Delay(5000, token); } }, token);
     var inputBlocker = new InputBlocker();
     try
     {
@@ -84,66 +163,80 @@ static async Task Connect(DiscoveryAnnouncement server, string deviceId, Cancell
         {
             var message = await Receive<JsonElement>(socket, token);
             if (message.ValueKind == JsonValueKind.Undefined) break;
-            await Handle(message, socket, terminal, inputBlocker, token);
+            await Handle(message, socket, terminal, inputBlocker, sendGate, token);
         }
     }
     finally { inputBlocker.Dispose(); }
 }
 
-static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, CancellationToken token)
+static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, SemaphoreSlim sendGate, CancellationToken token)
 {
-    var type = message.TryGetProperty("type", out var t) ? t.GetString() : "";
-    if (type == "terminalInput")
+    try
     {
-        var data = message.GetProperty("payload").GetProperty("data").GetString() ?? "";
-        await terminal.Write(data);
+        var type = message.TryGetProperty("type", out var t) ? t.GetString() : "";
+        if (type == "terminalInput")
+        {
+            var data = message.GetProperty("payload").GetProperty("data").GetString() ?? "";
+            await terminal.Write(data);
+        }
+        else if (type == "terminalRestart")
+            await terminal.Start(new("cmd", null), token);
+        else if (type == "controlStart") blocker.Enable();
+        else if (type == "controlStop") blocker.Disable();
+        else if (type == "controlInput") InputInjector.Apply(message.GetProperty("payload").Deserialize<InputEvent>(Protocol.Json)!);
+        else if (type == "fileUpload")
+        {
+            var payload = message.GetProperty("payload");
+            var path = RequirePath(payload, "path");
+            var data = Convert.FromBase64String(payload.GetProperty("dataBase64").GetString() ?? "");
+            await File.WriteAllBytesAsync(path, data, token);
+            await Send(socket, new { type = "fileResult", payload = new { operation = "upload", path, success = true, message = "Uploaded" } }, sendGate, token);
+        }
+        else if (type == "fileDownload")
+        {
+            var path = RequirePath(message.GetProperty("payload"), "path");
+            var data = await File.ReadAllBytesAsync(path, token);
+            await Send(socket, new { type = "fileDownload", payload = new { path, dataBase64 = Convert.ToBase64String(data) } }, sendGate, token);
+        }
+        else if (type == "fileDelete")
+        {
+            var path = RequirePath(message.GetProperty("payload"), "path");
+            if (Directory.Exists(path)) Directory.Delete(path, true); else File.Delete(path);
+            await Send(socket, new { type = "fileResult", payload = new { operation = "delete", path, success = true, message = "Deleted" } }, sendGate, token);
+        }
+        else if (type == "fileRename")
+        {
+            var payload = message.GetProperty("payload");
+            var path = RequirePath(payload, "path");
+            var newPath = RequirePath(payload, "newPath");
+            if (Directory.Exists(path)) Directory.Move(path, newPath); else File.Move(path, newPath);
+            await Send(socket, new { type = "fileResult", payload = new { operation = "rename", path = newPath, success = true, message = "Renamed" } }, sendGate, token);
+        }
+        else if (type == "executeFile")
+        {
+            var payload = message.GetProperty("payload");
+            var path = RequirePath(payload, "path");
+            var arguments = payload.TryGetProperty("arguments", out var args) ? args.GetString() ?? "" : "";
+            var psi = new ProcessStartInfo(path, arguments) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+            using var process = Process.Start(psi) ?? throw new InvalidOperationException("Unable to start file.");
+            var output = await process.StandardOutput.ReadToEndAsync(token);
+            var error = await process.StandardError.ReadToEndAsync(token);
+            await process.WaitForExitAsync(token);
+            await Send(socket, new { type = "fileResult", payload = new { operation = "execute", path, success = process.ExitCode == 0, message = output + error, exitCode = process.ExitCode } }, sendGate, token);
+        }
     }
-    else if (type == "terminalStart") await terminal.Start(message.GetProperty("payload").Deserialize<TerminalStart>(Protocol.Json) ?? new("powershell", null), socket, token);
-    else if (type == "terminalStop") terminal.Stop();
-    else if (type == "controlStart") blocker.Enable();
-    else if (type == "controlStop") blocker.Disable();
-    else if (type == "controlInput") InputInjector.Apply(message.GetProperty("payload").Deserialize<InputEvent>(Protocol.Json)!);
-    else if (type == "fileUpload")
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or FormatException or InvalidOperationException or JsonException)
     {
-        var payload = message.GetProperty("payload");
-        var path = payload.GetProperty("path").GetString() ?? "";
-        var data = Convert.FromBase64String(payload.GetProperty("dataBase64").GetString() ?? "");
-        await File.WriteAllBytesAsync(path, data, token);
-        await Send(socket, new { type = "fileResult", payload = new { operation = "upload", path, success = true, message = "Uploaded" } }, token);
+        ClientLog.Write($"Request '{message.GetProperty("type").GetString()}' failed: {ex.Message}");
+        await Send(socket, new { type = "requestError", error = ex.Message }, sendGate, token);
     }
-    else if (type == "fileDownload")
-    {
-        var path = message.GetProperty("payload").GetProperty("path").GetString() ?? "";
-        var data = await File.ReadAllBytesAsync(path, token);
-        await Send(socket, new { type = "fileDownload", payload = new { path, dataBase64 = Convert.ToBase64String(data) } }, token);
-    }
-    else if (type == "fileDelete")
-    {
-        var path = message.GetProperty("payload").GetProperty("path").GetString() ?? "";
-        if (Directory.Exists(path)) Directory.Delete(path, true); else File.Delete(path);
-        await Send(socket, new { type = "fileResult", payload = new { operation = "delete", path, success = true, message = "Deleted" } }, token);
-    }
-    else if (type == "fileRename")
-    {
-        var payload = message.GetProperty("payload");
-        var path = payload.GetProperty("path").GetString() ?? "";
-        var newPath = payload.GetProperty("newPath").GetString() ?? "";
-        if (Directory.Exists(path)) Directory.Move(path, newPath); else File.Move(path, newPath);
-        await Send(socket, new { type = "fileResult", payload = new { operation = "rename", path = newPath, success = true, message = "Renamed" } }, token);
-    }
-    else if (type == "executeFile")
-    {
-        var payload = message.GetProperty("payload");
-        var path = payload.GetProperty("path").GetString() ?? "";
-        var arguments = payload.TryGetProperty("arguments", out var args) ? args.GetString() ?? "" : "";
-        var psi = new ProcessStartInfo(path, arguments) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-        using var process = Process.Start(psi);
-        if (process is null) throw new InvalidOperationException("Unable to start file.");
-        var output = await process.StandardOutput.ReadToEndAsync(token);
-        var error = await process.StandardError.ReadToEndAsync(token);
-        await process.WaitForExitAsync(token);
-        await Send(socket, new { type = "fileResult", payload = new { operation = "execute", path, success = process.ExitCode == 0, message = output + error, exitCode = process.ExitCode } }, token);
-    }
+}
+
+static string RequirePath(JsonElement payload, string property)
+{
+    var path = payload.TryGetProperty(property, out var value) ? value.GetString() : null;
+    if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException($"Missing path '{property}'.");
+    return Path.GetFullPath(path);
 }
 
 static SystemStats CollectStats()
@@ -155,8 +248,33 @@ static SystemStats CollectStats()
 }
 static int? GetBattery() => null;
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
-static async Task Send<T>(ClientWebSocket socket, T value, CancellationToken token) => await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json), WebSocketMessageType.Text, true, token);
-static async Task<T?> Receive<T>(ClientWebSocket socket, CancellationToken token) { var buffer = new byte[256 * 1024]; var result = await socket.ReceiveAsync(buffer, token); return result.MessageType == WebSocketMessageType.Close ? default : JsonSerializer.Deserialize<T>(buffer.AsSpan(0, result.Count), Protocol.Json); }
+static async Task Send<T>(ClientWebSocket socket, T value, SemaphoreSlim sendGate, CancellationToken token)
+{
+    var data = JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json);
+    await sendGate.WaitAsync(token);
+    try { await socket.SendAsync(data, WebSocketMessageType.Text, true, token); }
+    finally { sendGate.Release(); }
+}
+
+static async Task<T?> Receive<T>(ClientWebSocket socket, CancellationToken token)
+{
+    var data = await ReceiveMessage(socket, token);
+    return data is null ? default : JsonSerializer.Deserialize<T>(data, Protocol.Json);
+}
+
+static async Task<byte[]?> ReceiveMessage(WebSocket socket, CancellationToken token)
+{
+    using var message = new MemoryStream();
+    var buffer = new byte[64 * 1024];
+    while (true)
+    {
+        var result = await socket.ReceiveAsync(buffer, token);
+        if (result.MessageType == WebSocketMessageType.Close) return null;
+        if (result.MessageType != WebSocketMessageType.Text) continue;
+        message.Write(buffer, 0, result.Count);
+        if (result.EndOfMessage) return message.ToArray();
+    }
+}
 static async Task StartupRegistration(string root)
 {
     using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run", true);
@@ -167,20 +285,82 @@ static async Task StartupRegistration(string root)
 sealed class TerminalManager : IDisposable
 {
     private Process? process;
-    public async Task Start(TerminalStart start, ClientWebSocket socket, CancellationToken token)
+    private readonly ClientWebSocket socket;
+    private readonly SemaphoreSlim sendGate;
+    private string? sessionId;
+
+    public TerminalManager(ClientWebSocket socket, SemaphoreSlim sendGate)
+    {
+        this.socket = socket;
+        this.sendGate = sendGate;
+    }
+
+    public async Task Start(TerminalStart start, CancellationToken token)
     {
         Stop();
-        var shell = string.Equals(start.Shell, "cmd", StringComparison.OrdinalIgnoreCase) ? "cmd.exe" : "powershell.exe";
-        process = new Process { StartInfo = new ProcessStartInfo(shell) { WorkingDirectory = string.IsNullOrWhiteSpace(start.WorkingDirectory) ? Environment.CurrentDirectory : start.WorkingDirectory, UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true } };
-        process.Start();
-        _ = Pump(process.StandardOutput, socket, false, token);
-        _ = Pump(process.StandardError, socket, true, token);
-        await Task.CompletedTask;
+        const string shell = "cmd.exe";
+        const string shellArguments = "/Q /K \"title RemoteAdmin\"";
+        var workingDirectory = string.IsNullOrWhiteSpace(start.WorkingDirectory)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            : Path.GetFullPath(start.WorkingDirectory);
+        if (!Directory.Exists(workingDirectory)) throw new DirectoryNotFoundException($"Working directory does not exist: {workingDirectory}");
+        process = new Process { StartInfo = new ProcessStartInfo(shell, shellArguments) { WorkingDirectory = workingDirectory, UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true } };
+        if (!process.Start()) throw new InvalidOperationException("Unable to start terminal process.");
+        sessionId = Guid.NewGuid().ToString("N");
+        await Send(new { type = "terminalStarted", payload = new { sessionId, shell, workingDirectory } }, token);
+        _ = Pump(process.StandardOutput, false, token);
+        _ = Pump(process.StandardError, true, token);
+        _ = MonitorExit(process, token);
     }
-    public async Task Write(string data) { if (process is { HasExited: false }) await process.StandardInput.WriteAsync(data); }
-    public void Stop() { try { if (process is { HasExited: false }) process.Kill(true); } catch { } process?.Dispose(); process = null; }
-    private static async Task Pump(StreamReader reader, ClientWebSocket socket, bool error, CancellationToken token) { var buffer = new char[2048]; while (!token.IsCancellationRequested) { var count = await reader.ReadAsync(buffer); if (count == 0) break; var payload = JsonSerializer.SerializeToUtf8Bytes(new { type = "terminalOutput", payload = new TerminalOutput("", new string(buffer, 0, count), error, false, null) }, Protocol.Json); await socket.SendAsync(payload, WebSocketMessageType.Text, true, token); } }
+    public async Task Write(string data)
+    {
+        if (process is not { HasExited: false }) throw new InvalidOperationException("No terminal session is running.");
+        await process.StandardInput.WriteAsync(data);
+        await process.StandardInput.FlushAsync();
+    }
+    public void Stop()
+    {
+        try { if (process is { HasExited: false }) process.Kill(true); } catch { }
+        process?.Dispose();
+        process = null;
+        sessionId = null;
+    }
+    private async Task Pump(StreamReader reader, bool error, CancellationToken token)
+    {
+        var buffer = new char[2048];
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var count = await reader.ReadAsync(buffer, token);
+                if (count == 0) break;
+                await Send(new { type = "terminalOutput", payload = new TerminalOutput(sessionId ?? "", new string(buffer, 0, count), error, false, null) }, token);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+    }
+    private async Task MonitorExit(Process terminalProcess, CancellationToken token)
+    {
+        try
+        {
+            await terminalProcess.WaitForExitAsync(token);
+            await Send(new { type = "terminalOutput", payload = new TerminalOutput(sessionId ?? "", "", false, true, terminalProcess.ExitCode) }, token);
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+    }
+    private Task Send<T>(T value, CancellationToken token) => ProgramSend(value, token);
+    private async Task ProgramSend<T>(T value, CancellationToken token) => await SendMessage(socket, value, sendGate, token);
     public void Dispose() => Stop();
+
+    private static async Task SendMessage<T>(ClientWebSocket socket, T value, SemaphoreSlim sendGate, CancellationToken token)
+    {
+        var data = JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json);
+        await sendGate.WaitAsync(token);
+        try { await socket.SendAsync(data, WebSocketMessageType.Text, true, token); }
+        finally { sendGate.Release(); }
+    }
 }
 
 sealed class InputBlocker : IDisposable
@@ -266,5 +446,20 @@ static class NativeStats
         public ulong TotalVirtual;
         public ulong AvailableVirtual;
         public ulong AvailableExtendedVirtual;
+    }
+}
+
+sealed record RelocationInfo(string SourcePath, int ParentProcessId)
+{
+    public static RelocationInfo? Parse(string[] args)
+    {
+        if (args.Length != 4 ||
+            !string.Equals(args[0], "--relocated-from", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(args[2], "--parent-pid", StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(args[3], out var parentProcessId) ||
+            string.IsNullOrWhiteSpace(args[1]))
+            return null;
+
+        return new RelocationInfo(args[1], parentProcessId);
     }
 }
