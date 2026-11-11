@@ -105,23 +105,25 @@ static bool TryDeleteOriginal(string path)
 
 static Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
 {
-    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp(), true);
+    var canControl = !LanDiscovery.IsLocalAddress(server.Host);
+    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp(), true, canControl);
     return ClientTransport.RunAsync(server, hello,
-        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, $"{server.Host}:{server.Port}", sessionToken), ClientLog.Write, token);
+        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, $"{server.Host}:{server.Port}", canControl, sessionToken), ClientLog.Write, token);
 }
 
-static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, string admin, CancellationToken token)
+static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, string admin, bool canControl, CancellationToken token)
 {
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
     token = lifetime.Token;
     using var terminal = new TerminalManager(socket, sendGate);
-    using var inputBlocker = new InputBlocker();
     await using var screen = new ScreenShareSession(
         indicatorToken => DesktopScreenSharing.OpenIndicatorAsync(admin, indicatorToken),
         DesktopScreenSharing.CaptureAsync,
         (state, sendToken) => Send(socket, new { type = "screenState", payload = state }, sendGate, sendToken),
         (frame, sendToken) => Send(socket, new { type = "screenFrame", payload = frame }, sendGate, sendToken),
         ClientLog.Write);
+    await using var control = new RemoteControlSession(screen, new WindowsInputSink(),
+        (state, sendToken) => Send(socket, new { type = "controlState", payload = state }, sendGate, sendToken), ClientLog.Write);
     Task statsTask = Task.CompletedTask;
     try
     {
@@ -149,7 +151,7 @@ static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, str
         {
             var message = await Receive<JsonElement>(socket, token);
             if (message.ValueKind == JsonValueKind.Undefined) break;
-            await Handle(message, socket, terminal, inputBlocker, screen, sendGate, notesPath, token);
+            await Handle(message, socket, terminal, screen, control, canControl, sendGate, notesPath, token);
         }
     }
     finally
@@ -161,7 +163,7 @@ static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, str
     }
 }
 
-static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, ScreenShareSession screen, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
+static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, ScreenShareSession screen, RemoteControlSession control, bool canControl, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
 {
     try
     {
@@ -176,6 +178,7 @@ static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalMa
         {
             var request = message.GetProperty("payload").Deserialize<ScreenStop>(Protocol.Json)
                 ?? throw new ArgumentException("Missing screen request.");
+            await control.StopAsync(request.RequestId);
             await screen.StopAsync(request.RequestId, token);
         }
         else if (type == "terminalInput")
@@ -193,9 +196,29 @@ static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalMa
             WriteNotes(notesPath, text);
             await Send(socket, new { type = "notesState", payload = new ClientNotes(text) }, sendGate, token);
         }
-        else if (type == "controlStart") blocker.Enable();
-        else if (type == "controlStop") blocker.Disable();
-        else if (type == "controlInput") InputInjector.Apply(message.GetProperty("payload").Deserialize<InputEvent>(Protocol.Json)!);
+        else if (type == "controlStart")
+        {
+            var request = message.GetProperty("payload").Deserialize<ControlRequest>(Protocol.Json)
+                ?? throw new ArgumentException("Missing control request.");
+            if (canControl) await control.StartAsync(request, token);
+            else await Send(socket, new { type = "controlState", payload = new ControlState(request.RequestId, "unavailable", "Remote control of the Admin computer itself is disabled to prevent input feedback.") }, sendGate, token);
+        }
+        else if (type == "controlStop")
+        {
+            var request = message.GetProperty("payload").Deserialize<ControlRequest>(Protocol.Json)
+                ?? throw new ArgumentException("Missing control request.");
+            await control.StopAsync(request.RequestId);
+        }
+        else if (type == "controlHeartbeat")
+        {
+            var request = message.GetProperty("payload").Deserialize<ControlRequest>(Protocol.Json);
+            if (request is not null) control.Heartbeat(request.RequestId);
+        }
+        else if (type == "controlInput")
+        {
+            var request = message.GetProperty("payload").Deserialize<ControlInput>(Protocol.Json);
+            if (canControl && request?.Input is not null) control.Apply(request);
+        }
         else if (type == "fileUpload")
         {
             var payload = message.GetProperty("payload");
@@ -377,19 +400,6 @@ sealed class TerminalManager : IDisposable
         try { await socket.SendAsync(data, WebSocketMessageType.Text, true, token); }
         finally { sendGate.Release(); }
     }
-}
-
-sealed class InputBlocker : IDisposable
-{
-    private bool enabled;
-    public void Enable() { enabled = true; }
-    public void Disable() { enabled = false; }
-    public void Dispose() => Disable();
-}
-
-static class InputInjector
-{
-    public static void Apply(InputEvent e) { }
 }
 
 static class ClientLog

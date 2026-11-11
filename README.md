@@ -58,3 +58,22 @@ While sharing, the client shows an always-on-top red circle in the upper-right c
 Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update Client.exe before screen viewing is available. The dashboard and its screen-view script are embedded in Admin.exe; no extra runtime files are required.
 
 Client targets `net10.0-windows` with Windows Forms for the visible stop indicator and Windows desktop capture. The published executables remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate indicator gating, local Stop, viewer isolation, cancellation and backpressure without starting a terminal or changing startup registration.
+
+### Target cursor and fullscreen control
+
+The target's visible Windows cursor is composited into each captured frame before resizing, including its current shape and hotspot. Cursors outside the shared primary display or hidden by Windows are not drawn.
+
+For unattended control of your own computers, open **View screen**, choose **Full screen**, then **Enable control** in the fullscreen toolbar. There is no target approval dialog. Mouse movement, left/middle/right clicks, dragging, wheel scrolling and physical keyboard keys are supported. The visible red stop indicator gains a gold ring while control is active; clicking it stops both input and screen sharing.
+
+**Stop control** returns to view-only mode. Escape or **Exit fullscreen**, loss of Admin window focus, a hidden tab, a connection failure or stopping screen sharing releases the keys/buttons held by this session. Control requires a heartbeat every 500 ms and ends after 2.5 seconds without one. It never resumes automatically after interruption. Other browser viewers cannot inject input into the owner's screen session. Image letterboxing is excluded from coordinate mapping, and multiple-monitor virtual desktop origins are handled correctly.
+
+Update both executables for control support; older clients can still be viewed but do not advertise remote control. Windows elevation boundaries, UAC/secure desktop and browser-reserved shortcuts remain unavailable. The target's local input is never blocked. Keyboard mapping uses physical key codes and the target's keyboard layout.
+
+Additional checks (native input is replaced by a fake API during tests):
+
+```powershell
+node tests/ScreenView.Tests.cjs
+dotnet run --project tests/WindowsInput.Tests -c Release
+```
+
+Remote control of the Admin computer itself is disabled to prevent injected input from being forwarded back into its own fullscreen viewer. Viewing that computer remains available.

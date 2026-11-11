@@ -192,6 +192,40 @@ internal static class ScreenSharingTests
         });
         await UntilAsync(async () => (await devices())!.Length == 0);
 
+        await test("fullscreen control routes are bound to their screen viewer and capability", async () =>
+        {
+            await using var peer = new ProbeClient(port, "control-routing", "control-routing", log, true, true);
+            await peer.Ready;
+            using var owner = new ClientWebSocket(); using var other = new ClientWebSocket();
+            var url = new Uri($"ws://127.0.0.1:{port}/ws/control-routing");
+            await owner.ConnectAsync(url, CancellationToken.None); await other.ConnectAsync(url, CancellationToken.None);
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+            await Send(owner, new { type = "controlStart", payload = new { fullscreen = true } });
+            Assert((await Receive(owner, limit.Token)).Contains("unavailable"), "Control started before viewing");
+            await Send(owner, new { type = "screenStart" });
+            using var start = JsonDocument.Parse(await peer.Messages.Reader.ReadAsync(limit.Token));
+            var id = start.RootElement.GetProperty("payload").GetProperty("requestId").GetString()!;
+            await Send(owner, new { type = "controlStart", payload = new { fullscreen = false } });
+            Assert((await Receive(owner, limit.Token)).Contains("unavailable"), "Control started outside fullscreen");
+            await Send(owner, new { type = "controlStart", payload = new { fullscreen = true, requestId = "spoofed" } });
+            using var control = JsonDocument.Parse(await peer.Messages.Reader.ReadAsync(limit.Token));
+            Assert(control.RootElement.GetProperty("payload").GetProperty("requestId").GetString() == id, "Control request ID was not bound to its viewer");
+            await peer.Send(new { type = "controlState", payload = new ControlState(id, "active") });
+            Assert((await Receive(owner, limit.Token)).Contains("active"), "Control state did not reach its viewer");
+            await Send(other, new { type = "controlStart", payload = new { fullscreen = true, requestId = id } });
+            Assert((await Receive(other, limit.Token)).Contains("unavailable"), "A non-viewing browser acquired control");
+            await Send(owner, new { type = "controlInput", payload = new { fullscreen = true, requestId = "spoofed", input = new InputEvent("keyDown",0,0,0,0,"KeyA") } });
+            using var input = JsonDocument.Parse(await peer.Messages.Reader.ReadAsync(limit.Token));
+            Assert(input.RootElement.GetProperty("type").GetString() == "controlInput" &&
+                input.RootElement.GetProperty("payload").GetProperty("requestId").GetString() == id, "Input was routed to the wrong owner");
+            owner.Abort();
+            using var stopped = JsonDocument.Parse(await peer.Messages.Reader.ReadAsync(limit.Token));
+            Assert(stopped.RootElement.GetProperty("type").GetString() == "controlStop", "Viewer closure did not release remote control");
+            using var screenStopped = JsonDocument.Parse(await peer.Messages.Reader.ReadAsync(limit.Token));
+            Assert(screenStopped.RootElement.GetProperty("type").GetString() == "screenStop", "Viewer closure did not stop sharing");
+        });
+        await UntilAsync(async () => (await devices())!.Length == 0);
+
         await test("old clients report screen sharing unsupported without receiving a screen command", async () =>
         {
             await using var peer = new ProbeClient(port, "old-screen-client", "old-screen-client", log);

@@ -4,6 +4,7 @@ public interface IScreenShareLease : IAsyncDisposable
 {
     CancellationToken Revoked { get; }
     bool IsVisible { get; }
+    ValueTask SetControlActiveAsync(bool active) => ValueTask.CompletedTask;
 }
 
 // Capture is only invoked after a visible local sharing indicator has opened.
@@ -19,6 +20,16 @@ public sealed class ScreenShareSession(
     private string? currentRequest;
     private Task currentTask = Task.CompletedTask;
     private bool disposed;
+    private ScreenAccess? activeScreen;
+
+    public bool IsActive(string requestId) => AccessFor(requestId) is not null;
+
+    internal ScreenAccess? AccessFor(string requestId)
+    {
+        var access = Volatile.Read(ref activeScreen);
+        return access is not null && access.RequestId == requestId && !access.Stopped.IsCancellationRequested &&
+            access.Indicator.IsVisible ? access : null;
+    }
 
     public async Task StartAsync(ScreenStart request, CancellationToken token)
     {
@@ -72,6 +83,7 @@ public sealed class ScreenShareSession(
                 return;
             }
             using var sharing = CancellationTokenSource.CreateLinkedTokenSource(token, indicator.Revoked);
+            Volatile.Write(ref activeScreen, new(requestId, indicator, sharing.Token));
             await sendState(new(requestId, "streaming", "The primary display is being shared. The client has a visible Stop sharing button."), sharing.Token);
             long sequence = 0;
             while (!sharing.IsCancellationRequested)
@@ -95,6 +107,7 @@ public sealed class ScreenShareSession(
         }
         finally
         {
+            Volatile.Write(ref activeScreen, null);
             // A stopped transport cannot keep the local sharing indicator alive.
             try
             {
@@ -120,4 +133,6 @@ public sealed class ScreenShareSession(
         await task;
         currentStop?.Dispose();
     }
+
+    internal sealed record ScreenAccess(string RequestId, IScreenShareLease Indicator, CancellationToken Stopped);
 }

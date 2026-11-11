@@ -8,6 +8,18 @@ namespace RemoteAdmin.Shared;
 
 public static class LanDiscovery
 {
+    public static bool IsLocalAddress(string host)
+    {
+        if (!IPAddress.TryParse(host, out var address)) return true;
+        if (IPAddress.IsLoopback(address)) return true;
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces().Any(network =>
+                network.GetIPProperties().UnicastAddresses.Any(local => local.Address.Equals(address)));
+        }
+        catch (NetworkInformationException) { return true; }
+    }
+
     public static IEnumerable<IPAddress> BroadcastAddresses()
     {
         foreach (var network in NetworkInterface.GetAllNetworkInterfaces())

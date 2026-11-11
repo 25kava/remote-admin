@@ -61,16 +61,45 @@ public sealed class DeviceHub(Action<string> log)
                             continue;
                         }
                         browser.ScreenSubscribed = true;
+                        browser.ScreenStarted = true;
                         message = JsonSerializer.SerializeToUtf8Bytes(new
                         { type = "screenStart", payload = new ScreenStart(browser.ScreenRequestId) }, Protocol.Json);
                     }
                     else if (type == "screenStop")
                     {
+                        await StopBrowserControl(browser);
                         browser.ScreenSubscribed = false;
                         message = JsonSerializer.SerializeToUtf8Bytes(new
                         { type = "screenStop", payload = new ScreenStop(browser.ScreenRequestId) }, Protocol.Json);
                     }
+                    else if (type is "controlStart" or "controlStop" or "controlInput" or "controlHeartbeat")
+                    {
+                        if (type == "controlStop") browser.ControlRequested = false;
+                        else if (!browser.ScreenSubscribed || !client.Snapshot.RemoteControlSupported ||
+                            !json.RootElement.TryGetProperty("payload", out var fullPayload) ||
+                            !fullPayload.TryGetProperty("fullscreen", out var fullscreen) || fullscreen.ValueKind != JsonValueKind.True)
+                        {
+                            if (type == "controlStart")
+                                await SendRaw(socket, JsonSerializer.SerializeToUtf8Bytes(new
+                                { type = "controlState", payload = new ControlState(browser.ScreenRequestId, "unavailable", "Open the live view in fullscreen and update Client.exe to enable control.") },
+                                    Protocol.Json), browser.SendGate, context.RequestAborted);
+                            continue;
+                        }
+                        if (type == "controlStart") { browser.ControlRequested = true; browser.ControlStarted = true; }
+                        if (type is "controlInput" or "controlHeartbeat" && !browser.ControlRequested) continue;
+                        message = type == "controlInput"
+                            ? JsonSerializer.SerializeToUtf8Bytes(new
+                            {
+                                type, payload = new ControlInput(browser.ScreenRequestId,
+                                    json.RootElement.GetProperty("payload").GetProperty("input").Deserialize<InputEvent>(Protocol.Json)!)
+                            }, Protocol.Json)
+                            : JsonSerializer.SerializeToUtf8Bytes(new { type, payload = new ControlRequest(browser.ScreenRequestId) }, Protocol.Json);
+                    }
                     await SendRaw(client.Socket, message, client.SendGate, context.RequestAborted);
+                    // Keep cleanup pending until the stop was actually sent. A page
+                    // reload can abort this request after the subscription flag changes.
+                    if (type == "screenStop") browser.ScreenStarted = false;
+                    if (type == "controlStop") browser.ControlStarted = false;
                 }
             }
         }
@@ -78,6 +107,7 @@ public sealed class DeviceHub(Action<string> log)
         finally
         {
             browsers.TryRemove(browserId, out _);
+            await StopBrowserControl(browser);
             await StopBrowserScreen(browser);
         }
     }
@@ -99,7 +129,7 @@ public sealed class DeviceHub(Action<string> log)
             id = hello.DeviceId;
             var ip = context.Connection.RemoteIpAddress?.ToString() ?? hello.IpAddress;
             client = new ClientConnection(socket, new(id, hello.ComputerName, hello.ComputerName,
-                "Connected", DateTime.UtcNow, ip, null, hello.ScreenStreamingSupported));
+                "Connected", DateTime.UtcNow, ip, null, hello.ScreenStreamingSupported, hello.RemoteControlSupported));
             ClientConnection? previous = null;
             clients.AddOrUpdate(id, client, (_, old) => { previous = old; return client; });
             // Abort does not race a second ReceiveAsync/CloseAsync on the previous socket.
@@ -146,6 +176,7 @@ public sealed class DeviceHub(Action<string> log)
             // Closing or refreshing the dashboard must not disconnect the managed PC.
             browsers.TryRemove(id, out _);
             browser.Socket.Abort();
+            await StopBrowserControl(browser);
             await StopBrowserScreen(browser);
             log($"Browser output for {browser.DeviceId} ended: {ex.Message}");
         }
@@ -153,7 +184,7 @@ public sealed class DeviceHub(Action<string> log)
 
     private async Task StopBrowserScreen(BrowserConnection browser)
     {
-        if (!browser.ScreenSubscribed) return;
+        if (!browser.ScreenStarted) return;
         browser.ScreenSubscribed = false;
         if (!clients.TryGetValue(browser.DeviceId, out var client)) return;
         try
@@ -162,8 +193,24 @@ public sealed class DeviceHub(Action<string> log)
             await SendRaw(client.Socket, JsonSerializer.SerializeToUtf8Bytes(new
             { type = "screenStop", payload = new ScreenStop(browser.ScreenRequestId) }, Protocol.Json),
                 client.SendGate, timeout.Token);
+            browser.ScreenStarted = false;
         }
         catch (Exception ex) when (IsConnectionError(ex)) { log($"Screen stop relay ended: {ex.Message}"); }
+    }
+
+    private async Task StopBrowserControl(BrowserConnection browser)
+    {
+        if (!browser.ControlStarted) return;
+        browser.ControlRequested = false;
+        if (!clients.TryGetValue(browser.DeviceId, out var client)) return;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await SendRaw(client.Socket, JsonSerializer.SerializeToUtf8Bytes(new
+            { type = "controlStop", payload = new ControlRequest(browser.ScreenRequestId) }, Protocol.Json), client.SendGate, timeout.Token);
+            browser.ControlStarted = false;
+        }
+        catch (Exception ex) when (IsConnectionError(ex)) { log($"Control stop relay ended: {ex.Message}"); }
     }
 
     private static (bool ScreenMessage, string? RequestId) ReadScreenRoute(byte[] data)
@@ -172,7 +219,7 @@ public sealed class DeviceHub(Action<string> log)
         {
             using var json = JsonDocument.Parse(data);
             if (json.RootElement.TryGetProperty("type", out var type) &&
-                type.GetString() is "screenFrame" or "screenState")
+                type.GetString() is "screenFrame" or "screenState" or "controlState")
             {
                 var requestId = json.RootElement.TryGetProperty("payload", out var payload) &&
                     payload.TryGetProperty("requestId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
@@ -236,6 +283,9 @@ public sealed class DeviceHub(Action<string> log)
     {
         public SemaphoreSlim SendGate { get; } = new(1, 1);
         public volatile bool ScreenSubscribed;
+        public volatile bool ControlRequested;
+        public volatile bool ScreenStarted;
+        public volatile bool ControlStarted;
     }
     private sealed record NameRequest(string Name);
 }

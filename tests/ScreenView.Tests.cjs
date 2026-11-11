@@ -1,0 +1,18 @@
+const assert=require('node:assert/strict');
+const geometry=require('../Admin/wwwroot/screen.js');
+const rect={left:0,top:0,width:1000,height:1000};
+const near=(point,x,y)=>assert.ok(point&&Math.abs(point.x-x)<1e-9&&Math.abs(point.y-y)<1e-9);
+assert.deepEqual(geometry.point(500,500,rect,1920,1080),{x:.5,y:.5});
+assert.equal(geometry.point(500,100,rect,1920,1080),null,'top letterbox must not move the remote cursor');
+assert.equal(geometry.point(500,900,rect,1920,1080),null,'bottom letterbox must not move the remote cursor');
+near(geometry.point(0,218.75,rect,1920,1080),0,0);
+near(geometry.point(1000,781.25,rect,1920,1080),1,1);
+const offset=geometry.point(20,155,{left:20,top:30,width:500,height:500},1000,500);
+assert.ok(Math.abs(offset.x)<1e-9&&Math.abs(offset.y)<1e-9);
+assert.equal(geometry.point(0,0,rect,0,1080),null);
+assert.equal(geometry.point(NaN,0,rect,1920,1080),null);
+assert.equal(geometry.wheel(100,0),-120);
+assert.equal(geometry.wheel(3,1),-120);
+assert.equal(geometry.wheel(-2,2),240);
+assert.equal(geometry.wheel(99999,0),-1200);
+console.log('PASS 12 fullscreen geometry and wheel assertions');

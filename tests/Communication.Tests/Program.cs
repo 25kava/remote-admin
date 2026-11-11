@@ -269,6 +269,7 @@ await Test("WebSocket keepalive detects a silent network blackhole", async () =>
 });
 
 await ScreenSharingTests.RunAsync(Test, portNumber, Devices, Log);
+await RemoteControlTests.RunAsync(Test, Log);
 
 if (args.Contains("--live"))
 {
@@ -341,14 +342,14 @@ sealed class ProbeClient : IAsyncDisposable
     public Task Completion { get; }
     public Channel<string> Messages { get; } = Channel.CreateUnbounded<string>();
     public static SystemStats Stats => new(5, 25, 100, 200, "communication test", "127.0.0.1", null, 60);
-    public ProbeClient(int port, string id, string name, Action<string> log, bool screenSupported = false)
+    public ProbeClient(int port, string id, string name, Action<string> log, bool screenSupported = false, bool controlSupported = false)
     {
         Completion = Run();
         async Task Run()
         {
             try
             {
-                await ClientTransport.RunAsync(new("127.0.0.1", port, "test"), new("clientHello", id, name, "test", "127.0.0.1", screenSupported),
+                await ClientTransport.RunAsync(new("127.0.0.1", port, "test"), new("clientHello", id, name, "test", "127.0.0.1", screenSupported, controlSupported),
                     async (ws, sendGate, token) =>
                     {
                         socket = ws;

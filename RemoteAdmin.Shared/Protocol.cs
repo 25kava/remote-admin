@@ -23,7 +23,8 @@ public sealed record ClientHello(
     string ComputerName,
     string UserName,
     string IpAddress,
-    bool ScreenStreamingSupported = false);
+    bool ScreenStreamingSupported = false,
+    bool RemoteControlSupported = false);
 
 public sealed record ServerHello(string Type, string? Message);
 public sealed record ClientNotes(string Text);
@@ -36,7 +37,8 @@ public sealed record DeviceSnapshot(
     DateTime LastSeenUtc,
     string? IpAddress,
     SystemStats? Stats,
-    bool ScreenStreamingSupported = false);
+    bool ScreenStreamingSupported = false,
+    bool RemoteControlSupported = false);
 
 public sealed record SystemStats(
     double CpuPercent,
@@ -68,3 +70,6 @@ public sealed record ScreenStart(string RequestId);
 public sealed record ScreenStop(string RequestId);
 public sealed record ScreenShareState(string RequestId, string Status, string? Message = null);
 public sealed record ScreenFrame(string RequestId, int Width, int Height, string JpegBase64, long Sequence, DateTime CapturedAtUtc);
+public sealed record ControlRequest(string RequestId);
+public sealed record ControlInput(string RequestId, InputEvent Input);
+public sealed record ControlState(string RequestId, string Status, string? Message = null);

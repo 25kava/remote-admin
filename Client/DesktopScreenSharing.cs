@@ -83,6 +83,11 @@ internal static class DesktopScreenSharing
         private int disposed;
         public CancellationToken Revoked => revoked.Token;
         public bool IsVisible => IsWindowVisible(handle) && !IsIconic(handle);
+        public async ValueTask SetControlActiveAsync(bool active)
+        {
+            var ui = await dispatcher.Value;
+            await ui.InvokeAsync(() => { if (!window.IsDisposed) window.SetControlActive(active); });
+        }
         public void Revoke()
         {
             try { revoked.Cancel(); }
@@ -110,7 +115,10 @@ internal static class DesktopScreenSharing
         var bounds = Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("No primary display is available.");
         using var original = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
         using (var graphics = Graphics.FromImage(original))
+        {
             graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy);
+            DesktopCursor.Draw(graphics, bounds);
+        }
         var scale = Math.Min(1d, Math.Min(1280d / bounds.Width, 720d / bounds.Height));
         var width = Math.Max(1, (int)Math.Round(bounds.Width * scale));
         var height = Math.Max(1, (int)Math.Round(bounds.Height * scale));
@@ -130,7 +138,7 @@ internal static class DesktopScreenSharing
             Convert.ToBase64String(buffer.GetBuffer(), 0, (int)buffer.Length), sequence, DateTime.UtcNow));
     }
 
-    private static bool IsInteractiveDesktop()
+    internal static bool IsInteractiveDesktop()
     {
         var desktop = OpenInputDesktop(0, false, 0x0001);
         if (desktop == IntPtr.Zero) return false;
@@ -154,10 +162,13 @@ internal static class DesktopScreenSharing
 internal sealed class ScreenShareWindow : Form
 {
     private readonly ToolTip tooltip = new() { InitialDelay = 200, AutoPopDelay = 10000, ShowAlways = true };
+    private readonly string admin;
+    private readonly ScreenStopButton stop;
 
     public ScreenShareWindow(string admin)
     {
         SuspendLayout();
+        this.admin = admin;
         Text = "Skärmdelning pågår – klicka för att stoppa";
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -173,7 +184,7 @@ internal sealed class ScreenShareWindow : Form
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.FromArgb(239, 68, 68);
         AccessibleName = "Skärmdelning pågår";
-        var stop = new ScreenStopButton { Dock = DockStyle.Fill, AccessibleName = "Stoppa skärmdelning",
+        stop = new ScreenStopButton { Dock = DockStyle.Fill, AccessibleName = "Stoppa skärmdelning",
             AccessibleDescription = $"Din huvudskärm delas med Admin på {admin}. Klicka för att stoppa delningen." };
         stop.Click += (_, _) => Close();
         Controls.Add(stop);
@@ -188,6 +199,16 @@ internal sealed class ScreenShareWindow : Form
             tooltip.Dispose();
         };
         ResumeLayout(true);
+    }
+
+    public void SetControlActive(bool active)
+    {
+        Text = active ? "Fjärrstyrning pågår – klicka för att stoppa" : "Skärmdelning pågår – klicka för att stoppa";
+        AccessibleName = active ? "Fjärrstyrning pågår" : "Skärmdelning pågår";
+        stop.ControlActive = active;
+        stop.AccessibleName = active ? "Stoppa fjärrstyrning och skärmdelning" : "Stoppa skärmdelning";
+        tooltip.SetToolTip(stop, $"{(active ? "Fjärrstyrning och skärmdelning pågår" : "Skärmdelning pågår")}\nAdmin: {admin}\nKlicka för att stoppa");
+        stop.Invalidate();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -244,6 +265,8 @@ internal sealed class ScreenShareWindow : Form
     private sealed class ScreenStopButton : Button
     {
         private bool hover;
+        [System.ComponentModel.DefaultValue(false)]
+        public bool ControlActive { get; set; }
         public ScreenStopButton()
         {
             FlatStyle = FlatStyle.Flat;
@@ -259,7 +282,7 @@ internal sealed class ScreenShareWindow : Form
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             var bounds = new RectangleF(1, 1, Width - 2, Height - 2);
             using var red = new SolidBrush(hover ? Color.FromArgb(220, 38, 38) : Color.FromArgb(239, 68, 68));
-            using var ring = new Pen(Color.White, Math.Max(1, DeviceDpi / 96f));
+            using var ring = new Pen(ControlActive ? Color.Gold : Color.White, Math.Max(1, DeviceDpi / 96f));
             e.Graphics.FillEllipse(red, bounds);
             e.Graphics.DrawEllipse(ring, bounds);
             var size = Math.Max(8, Width / 4);
