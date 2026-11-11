@@ -48,3 +48,13 @@ When `Client.exe` is started from outside `%LOCALAPPDATA%\RemoteAdmin`, it copie
 Remote terminal sessions start in the logged-in user's profile directory by default (`%USERPROFILE%`).
 The client starts one CMD session automatically for each Admin connection; the dashboard does not expose start or stop controls.
 Selecting a device in the dashboard restarts its CMD session so a previous `exit` command cannot permanently remove the terminal.
+
+### Live screen
+
+Update both executables to use the live screen panel. Select a connected device and choose **View screen**. The client shares its primary display as JPEG frames, at up to 5 fps and 1280 x 720 pixels, through the existing WebSocket connection. A slow connection does not build an image backlog.
+
+While sharing, the client shows an always-on-top red circle in the upper-right corner of the primary display. The white stop symbol, hover text and accessible button name identify it as **Stop sharing**. Clicking the circle stops sharing immediately. There is no per-session confirmation dialog. The indicator is shown before capture starts; capture stops if it is hidden or minimized, or if the desktop locks or becomes unavailable. Closing the Admin viewer, changing devices or losing the connection also stops sharing. A new viewing request is required to restart it.
+
+Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update Client.exe before screen viewing is available. The dashboard and its screen-view script are embedded in Admin.exe; no extra runtime files are required.
+
+Client targets `net10.0-windows` with Windows Forms for the visible stop indicator and Windows desktop capture. The published executables remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate indicator gating, local Stop, viewer isolation, cancellation and backpressure without starting a terminal or changing startup registration.

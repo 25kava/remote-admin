@@ -34,8 +34,8 @@ public sealed class DeviceHub(Action<string> log)
         if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
         if (!clients.ContainsKey(id)) { context.Response.StatusCode = 404; return; }
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
-        var browser = new BrowserConnection(id, socket);
         var browserId = Guid.NewGuid();
+        var browser = new BrowserConnection(id, socket, browserId.ToString("N"));
         browsers[browserId] = browser;
         try
         {
@@ -46,11 +46,40 @@ public sealed class DeviceHub(Action<string> log)
                 // A browser session can outlive a client reconnect. Resolve the current
                 // connection for each message instead of holding a stale socket/gate pair.
                 if (clients.TryGetValue(id, out var client))
+                {
+                    using var json = JsonDocument.Parse(message);
+                    var type = json.RootElement.TryGetProperty("type", out var kind) ? kind.GetString() : null;
+                    if (type == "screenStart")
+                    {
+                        if (!client.Snapshot.ScreenStreamingSupported)
+                        {
+                            await SendRaw(socket, JsonSerializer.SerializeToUtf8Bytes(new
+                            {
+                                type = "screenState", payload = new ScreenShareState(browser.ScreenRequestId,
+                                    "unsupported", "Update Client.exe on this computer to enable screen sharing.")
+                            }, Protocol.Json), browser.SendGate, context.RequestAborted);
+                            continue;
+                        }
+                        browser.ScreenSubscribed = true;
+                        message = JsonSerializer.SerializeToUtf8Bytes(new
+                        { type = "screenStart", payload = new ScreenStart(browser.ScreenRequestId) }, Protocol.Json);
+                    }
+                    else if (type == "screenStop")
+                    {
+                        browser.ScreenSubscribed = false;
+                        message = JsonSerializer.SerializeToUtf8Bytes(new
+                        { type = "screenStop", payload = new ScreenStop(browser.ScreenRequestId) }, Protocol.Json);
+                    }
                     await SendRaw(client.Socket, message, client.SendGate, context.RequestAborted);
+                }
             }
         }
-        catch (Exception ex) when (IsConnectionError(ex)) { log($"Browser relay for {id} ended: {ex.Message}"); }
-        finally { browsers.TryRemove(browserId, out _); }
+        catch (Exception ex) when (IsConnectionError(ex) || ex is JsonException) { log($"Browser relay for {id} ended: {ex.Message}"); }
+        finally
+        {
+            browsers.TryRemove(browserId, out _);
+            await StopBrowserScreen(browser);
+        }
     }
 
     private async Task AcceptClient(HttpContext context)
@@ -70,7 +99,7 @@ public sealed class DeviceHub(Action<string> log)
             id = hello.DeviceId;
             var ip = context.Connection.RemoteIpAddress?.ToString() ?? hello.IpAddress;
             client = new ClientConnection(socket, new(id, hello.ComputerName, hello.ComputerName,
-                "Connected", DateTime.UtcNow, ip, null));
+                "Connected", DateTime.UtcNow, ip, null, hello.ScreenStreamingSupported));
             ClientConnection? previous = null;
             clients.AddOrUpdate(id, client, (_, old) => { previous = old; return client; });
             // Abort does not race a second ReceiveAsync/CloseAsync on the previous socket.
@@ -86,7 +115,9 @@ public sealed class DeviceHub(Action<string> log)
                 if (!clients.TryGetValue(id, out var current) || !ReferenceEquals(current, client)) break;
                 var stats = ReadStats(data);
                 client.Update(old => old with { LastSeenUtc = DateTime.UtcNow, Stats = stats ?? old.Stats });
+                var (screenMessage, screenRequestId) = ReadScreenRoute(data);
                 await Task.WhenAll(browsers.Where(x => x.Value.DeviceId == id)
+                    .Where(x => !screenMessage || (x.Value.ScreenSubscribed && x.Value.ScreenRequestId == screenRequestId))
                     .Select(x => ForwardToBrowser(x.Key, x.Value, data, context.RequestAborted)));
             }
         }
@@ -115,8 +146,41 @@ public sealed class DeviceHub(Action<string> log)
             // Closing or refreshing the dashboard must not disconnect the managed PC.
             browsers.TryRemove(id, out _);
             browser.Socket.Abort();
+            await StopBrowserScreen(browser);
             log($"Browser output for {browser.DeviceId} ended: {ex.Message}");
         }
+    }
+
+    private async Task StopBrowserScreen(BrowserConnection browser)
+    {
+        if (!browser.ScreenSubscribed) return;
+        browser.ScreenSubscribed = false;
+        if (!clients.TryGetValue(browser.DeviceId, out var client)) return;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await SendRaw(client.Socket, JsonSerializer.SerializeToUtf8Bytes(new
+            { type = "screenStop", payload = new ScreenStop(browser.ScreenRequestId) }, Protocol.Json),
+                client.SendGate, timeout.Token);
+        }
+        catch (Exception ex) when (IsConnectionError(ex)) { log($"Screen stop relay ended: {ex.Message}"); }
+    }
+
+    private static (bool ScreenMessage, string? RequestId) ReadScreenRoute(byte[] data)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(data);
+            if (json.RootElement.TryGetProperty("type", out var type) &&
+                type.GetString() is "screenFrame" or "screenState")
+            {
+                var requestId = json.RootElement.TryGetProperty("payload", out var payload) &&
+                    payload.TryGetProperty("requestId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+                return (true, requestId);
+            }
+        }
+        catch (JsonException) { }
+        return (false, null);
     }
 
     private static bool IsConnectionError(Exception ex) =>
@@ -168,9 +232,10 @@ public sealed class DeviceHub(Action<string> log)
         { lock (gate) Volatile.Write(ref snapshot, update(snapshot)); }
     }
 
-    private sealed record BrowserConnection(string DeviceId, WebSocket Socket)
+    private sealed record BrowserConnection(string DeviceId, WebSocket Socket, string ScreenRequestId)
     {
         public SemaphoreSlim SendGate { get; } = new(1, 1);
+        public volatile bool ScreenSubscribed;
     }
     private sealed record NameRequest(string Name);
 }

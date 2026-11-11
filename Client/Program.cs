@@ -105,17 +105,23 @@ static bool TryDeleteOriginal(string path)
 
 static Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
 {
-    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp());
+    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp(), true);
     return ClientTransport.RunAsync(server, hello,
-        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, sessionToken), ClientLog.Write, token);
+        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, $"{server.Host}:{server.Port}", sessionToken), ClientLog.Write, token);
 }
 
-static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
+static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, string admin, CancellationToken token)
 {
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
     token = lifetime.Token;
     using var terminal = new TerminalManager(socket, sendGate);
     using var inputBlocker = new InputBlocker();
+    await using var screen = new ScreenShareSession(
+        indicatorToken => DesktopScreenSharing.OpenIndicatorAsync(admin, indicatorToken),
+        DesktopScreenSharing.CaptureAsync,
+        (state, sendToken) => Send(socket, new { type = "screenState", payload = state }, sendGate, sendToken),
+        (frame, sendToken) => Send(socket, new { type = "screenFrame", payload = frame }, sendGate, sendToken),
+        ClientLog.Write);
     Task statsTask = Task.CompletedTask;
     try
     {
@@ -143,7 +149,7 @@ static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, str
         {
             var message = await Receive<JsonElement>(socket, token);
             if (message.ValueKind == JsonValueKind.Undefined) break;
-            await Handle(message, socket, terminal, inputBlocker, sendGate, notesPath, token);
+            await Handle(message, socket, terminal, inputBlocker, screen, sendGate, notesPath, token);
         }
     }
     finally
@@ -155,12 +161,24 @@ static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, str
     }
 }
 
-static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
+static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalManager terminal, InputBlocker blocker, ScreenShareSession screen, SemaphoreSlim sendGate, string notesPath, CancellationToken token)
 {
     try
     {
         var type = message.TryGetProperty("type", out var t) ? t.GetString() : "";
-        if (type == "terminalInput")
+        if (type == "screenStart")
+        {
+            var request = message.GetProperty("payload").Deserialize<ScreenStart>(Protocol.Json)
+                ?? throw new ArgumentException("Missing screen request.");
+            await screen.StartAsync(request, token);
+        }
+        else if (type == "screenStop")
+        {
+            var request = message.GetProperty("payload").Deserialize<ScreenStop>(Protocol.Json)
+                ?? throw new ArgumentException("Missing screen request.");
+            await screen.StopAsync(request.RequestId, token);
+        }
+        else if (type == "terminalInput")
         {
             var data = message.GetProperty("payload").GetProperty("data").GetString() ?? "";
             await terminal.Write(data);

@@ -26,7 +26,8 @@ app.UseWebSockets(new WebSocketOptions
 });
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapGet("/", () => Results.Content(ReadDashboard(), "text/html"));
+app.MapGet("/", () => Results.Content(ReadAsset("index.html"), "text/html"));
+app.MapGet("/screen.js", () => Results.Content(ReadAsset("screen.js"), "text/javascript"));
 
 var discoveryTask = Task.Run(() => DiscoveryLoop(app.Lifetime.ApplicationStopping));
 new DeviceHub(Log).MapEndpoints(app);
@@ -61,9 +62,9 @@ async Task DiscoveryLoop(CancellationToken stop)
 }
 
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
-static string ReadDashboard()
+static string ReadAsset(string fileName)
 {
-    var resource = typeof(Program).Assembly.GetManifestResourceNames().FirstOrDefault(x => x.EndsWith("wwwroot.index.html", StringComparison.OrdinalIgnoreCase));
+    var resource = typeof(Program).Assembly.GetManifestResourceNames().FirstOrDefault(x => x.EndsWith("wwwroot." + fileName, StringComparison.OrdinalIgnoreCase));
     if (resource is null) return "<h1>Dashboard resource missing</h1>";
     using var stream = typeof(Program).Assembly.GetManifestResourceStream(resource);
     using var reader = new StreamReader(stream!);

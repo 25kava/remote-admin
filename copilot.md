@@ -94,7 +94,7 @@ The current plug-and-play requirement is intentional: `Client.exe` is still one 
 
 ## Known limitations
 
-This remains a prototype. Screen capture/streaming, real mouse and keyboard injection, clipboard synchronization, local input blocking, and a complete file-transfer dashboard are not finished. The dashboard contains controls for some future session features, but those controls must not be described as fully functional without implementing and testing their corresponding client handlers.
+This remains a prototype. Primary-display screen capture/streaming is implemented. Real mouse and keyboard injection, clipboard synchronization, local input blocking, and a complete file-transfer dashboard are not finished. The dashboard contains controls for some future session features, but those controls must not be described as fully functional without implementing and testing their corresponding client handlers.
 
 The terminal implementation is basic streamed standard I/O rather than a complete pseudo-terminal. CPU/RAM statistics are operational but should be tested on additional Windows 11 hardware.
 
@@ -111,3 +111,13 @@ Do not add a third runtime executable or an installer unless the project require
 ## Communication tests
 
 Run `dotnet run --project tests/Communication.Tests -c Release` for isolated regression tests of discovery, independent reconnects, fallback addresses, cancellation, logging, concurrent device registration, browser disconnect isolation and silent network failures. Add `-- --live --soak` to discover an existing LAN Admin and maintain a temporary inert test client for 75 seconds. Tests do not start terminals or alter startup registration and are not a third distributed runtime executable.
+
+## Live screen architecture
+
+- `Client/DesktopScreenSharing.cs` captures the primary interactive desktop and shows a 40-DIP red circular Stop button at the top-right. The indicator remains on top, has a stop symbol, hover text and an accessible button name, and does not take focus when shown. Its taskbar entry also makes the stop control discoverable. It is displayed before any screen pixels are captured. It closes on session lock, logoff or disconnect.
+- `RemoteAdmin.Shared/ScreenShareSession.cs` owns each viewing session. There is no per-session consent dialog. A visible indicator lease is mandatory, checked before capture and before sending each frame. Local Stop, a hidden/minimized indicator, transport cancellation and capture failure end the session. Never add a path that captures without the visible local indicator.
+- Frames use JPEG, quality 65, max 1280x720, max 5 fps, with each send awaited to prevent a backlog. Secure/locked desktops are unavailable. Capture is primary-display only; there is no cursor overlay, audio or remote input implementation.
+- `screenStart`, `screenStop`, `screenState` and `screenFrame` use shared records. DeviceHub generates the browser's request ID, rewrites start/stop requests and sends screen messages only to that subscribed browser. Viewer closure sends a matching stop; no stream automatically resumes after reconnecting.
+- ClientHello and DeviceSnapshot include an optional screen capability flag; old clients default to unsupported. Updating both runtime executables is necessary for screen viewing. Existing non-screen protocol remains compatible.
+- Client targets `net10.0-windows` with `UseWindowsForms=true`. Both outputs remain self-contained win-x64 single files. Admin embeds both dashboard HTML and `screen.js`.
+- Communication tests include screen session lifecycle, unavailable/hidden indicator, stop ownership, browser isolation and old-client handling. Native stop-indicator and desktop JPEG capture were also checked with a local test harness; no screen frames were sent to remote computers in that test.
