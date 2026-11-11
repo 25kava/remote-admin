@@ -40,8 +40,9 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Uses a mutex to prevent duplicate local instances.
 - Writes its device ID and logs under `%LOCALAPPDATA%\RemoteAdmin\`.
 - Registers or updates `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\RemoteAdminClient`.
-- Ensures its outbound LAN firewall rules for UDP 38991 and TCP 38992 on first run, requesting UAC approval when needed.
+- Uses only outbound UDP/TCP connections and never requests administrator privileges or configures firewall rules.
 - Sends statistics approximately every five seconds.
+- Discovery waits for the complete response window and can receive all Admin responses instead of abandoning the search after 250 ms.
 
 `Admin.exe`:
 
@@ -50,6 +51,8 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Ensures inbound LAN firewall rules for UDP 38991 and TCP 38992 on first run, requesting UAC approval when needed.
 - Serves a dark dashboard with device list and terminal/session controls.
 - Writes technical logs under `%LOCALAPPDATA%\RemoteAdmin\Admin\`.
+- Uses identity-aware WebSocket cleanup so an older connection cannot remove a newer reconnect for the same device.
+- Refreshes the dashboard device list every 500 ms so discovered clients appear with minimal UI delay.
 
 ## Build and publish
 
@@ -69,6 +72,8 @@ After changing either executable, commit the source and updated `release-final` 
 git lfs install
 git lfs pull
 ```
+
+The current plug-and-play requirement is intentional: `Client.exe` is still one self-contained executable and is never elevated. It performs only outbound network operations. `Admin.exe` remains responsible for inbound firewall configuration because it is the LAN listener.
 
 ## Current implemented functionality
 

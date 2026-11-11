@@ -79,8 +79,11 @@ app.Map("/client", async context =>
     Log($"Client connected: {hello.ComputerName} ({hello.DeviceId}) from {hello.IpAddress}.");
     var snapshot = new DeviceSnapshot(hello.DeviceId, hello.ComputerName, hello.ComputerName, "Connected", DateTime.UtcNow, hello.IpAddress, null);
     devices[hello.DeviceId] = snapshot;
+    if (connections.TryGetValue(hello.DeviceId, out var previousSocket) && previousSocket.State == WebSocketState.Open)
+        _ = previousSocket.CloseAsync(WebSocketCloseStatus.EndpointUnavailable, "Replaced", CancellationToken.None);
     connections[hello.DeviceId] = clientSocket;
-    var sendGate = clientSendGates.GetOrAdd(hello.DeviceId, _ => new SemaphoreSlim(1, 1));
+    var sendGate = new SemaphoreSlim(1, 1);
+    clientSendGates[hello.DeviceId] = sendGate;
     await SendJson(clientSocket, new ServerHello("serverHello", null), sendGate, context.RequestAborted);
     try
     {
@@ -99,10 +102,15 @@ app.Map("/client", async context =>
     catch (OperationCanceledException) { }
     finally
     {
-        connections.TryRemove(hello.DeviceId, out _);
-        if (clientSendGates.TryRemove(hello.DeviceId, out var gate)) gate.Dispose();
+        var ownsConnection = connections.TryGetValue(hello.DeviceId, out var currentSocket) &&
+            ReferenceEquals(currentSocket, clientSocket);
+        if (ownsConnection)
+        {
+            RemoveCurrent(connections, hello.DeviceId, clientSocket);
+            if (clientSendGates.TryRemove(hello.DeviceId, out var gate)) gate.Dispose();
+            devices.TryRemove(hello.DeviceId, out _);
+        }
         Log($"Client disconnected: {hello.ComputerName} ({hello.DeviceId}).");
-        devices.TryRemove(hello.DeviceId, out _);
     }
 });
 
@@ -143,6 +151,8 @@ async Task RegistryHeartbeat(CancellationToken stop)
 
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
 static bool TryGetStats(string json, out SystemStats? stats) { stats = null; try { var envelope = JsonSerializer.Deserialize<JsonElement>(json, Protocol.Json); if (envelope.GetProperty("type").GetString() == "stats") { stats = envelope.GetProperty("payload").Deserialize<SystemStats>(Protocol.Json); return stats is not null; } } catch { } return false; }
+static void RemoveCurrent(ConcurrentDictionary<string, WebSocket> map, string key, WebSocket expected)
+    => ((ICollection<KeyValuePair<string, WebSocket>>)map).Remove(new(key, expected));
 static async Task<T?> ReceiveJson<T>(WebSocket socket, CancellationToken cancellationToken)
 {
     var data = await ReceiveMessage(socket, cancellationToken);

@@ -13,8 +13,6 @@ var appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.L
 Directory.CreateDirectory(appData);
 var logPath = Path.Combine(appData, "Client.log");
 ClientLog.Path = logPath;
-if (FirewallSetup.HandleElevatedCommand(args, Environment.ProcessPath!, ClientLog.Write))
-    return;
 var removeOriginalAfterRelocation = false;
 var relocation = RelocationInfo.Parse(args);
 if (relocation is not null)
@@ -62,7 +60,6 @@ else if (!IsUnderDirectory(Environment.ProcessPath, appData))
 }
 
 ClientLog.Write("Client started.");
-FirewallSetup.EnsureClient(Environment.ProcessPath!, ClientLog.Write);
 var deviceIdPath = Path.Combine(appData, "device.id");
 var deviceId = File.Exists(deviceIdPath) ? File.ReadAllText(deviceIdPath) : Guid.NewGuid().ToString("N");
 File.WriteAllText(deviceIdPath, deviceId);
@@ -147,7 +144,9 @@ static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken
         try
         {
             var receiveTask = udp.ReceiveAsync(token).AsTask();
-            if (await Task.WhenAny(receiveTask, Task.Delay(250, token)) != receiveTask) break;
+            var remaining = until - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero) break;
+            if (await Task.WhenAny(receiveTask, Task.Delay(remaining, token)) != receiveTask) break;
             var packet = await receiveTask;
             ClientLog.Write($"Received discovery response from {packet.RemoteEndPoint}.");
             var server = JsonSerializer.Deserialize<DiscoveryAnnouncement>(packet.Buffer, Protocol.Json);

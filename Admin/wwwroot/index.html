@@ -12,5 +12,5 @@ function sendCmd(){let v=cmd.value;if(v){send({type:'terminalInput',payload:{ses
 function clearTerminal(){terminal.textContent=''}
 function saveNotes(){send({type:'notesSet',payload:{text:notes.value}})}
 function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-load();setInterval(load,3000);
+load();setInterval(load,500);
 </script></body></html>

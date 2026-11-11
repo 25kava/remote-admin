@@ -7,9 +7,6 @@ public static class FirewallSetup
 {
     private const string AdminDiscoveryRule = "Remote Admin - Discovery (UDP 38991)";
     private const string AdminClientRule = "Remote Admin - Client connections (TCP 38992)";
-    private const string ClientWebSocketRule = "Remote Admin Client - WebSocket outbound (TCP 38992)";
-    private const string ClientDiscoveryRule = "Remote Admin Client - Discovery outbound (UDP 38991)";
-
     public static bool HandleElevatedCommand(string[] args, string executablePath, Action<string> log)
     {
         var roleIndex = Array.IndexOf(args, "--firewall-role");
@@ -18,17 +15,13 @@ public static class FirewallSetup
 
         var role = args[roleIndex + 1];
         var success = role.Equals("admin", StringComparison.OrdinalIgnoreCase)
-            ? ConfigureAdmin(executablePath, log)
-            : role.Equals("client", StringComparison.OrdinalIgnoreCase) && ConfigureClient(executablePath, log);
+            && ConfigureAdmin(executablePath, log);
         Environment.ExitCode = success ? 0 : 1;
         return true;
     }
 
     public static bool EnsureAdmin(string executablePath, Action<string> log) =>
         Ensure(executablePath, "admin", [AdminDiscoveryRule, AdminClientRule], log);
-
-    public static bool EnsureClient(string executablePath, Action<string> log) =>
-        Ensure(executablePath, "client", [ClientWebSocketRule, ClientDiscoveryRule], log);
 
     private static bool Ensure(string executablePath, string role, string[] ruleNames, Action<string> log)
     {
@@ -58,7 +51,7 @@ public static class FirewallSetup
             }
         }
 
-        return role == "admin" ? ConfigureAdmin(executablePath, log) : ConfigureClient(executablePath, log);
+        return role == "admin" && ConfigureAdmin(executablePath, log);
     }
 
     private static bool ConfigureAdmin(string executablePath, Action<string> log) =>
@@ -66,12 +59,6 @@ public static class FirewallSetup
             ["name=" + AdminDiscoveryRule, "dir=in", "action=allow", "protocol=UDP", "localport=38991", "program=" + executablePath, "profile=any", "enable=yes"],
             ["name=" + AdminClientRule, "dir=in", "action=allow", "protocol=TCP", "localport=38992", "program=" + executablePath, "profile=any", "enable=yes"]
         ], [AdminDiscoveryRule, AdminClientRule], log);
-
-    private static bool ConfigureClient(string executablePath, Action<string> log) =>
-        ReplaceRules([
-            ["name=" + ClientWebSocketRule, "dir=out", "action=allow", "protocol=TCP", "remoteport=38992", "program=" + executablePath, "profile=any", "enable=yes"],
-            ["name=" + ClientDiscoveryRule, "dir=out", "action=allow", "protocol=UDP", "remoteport=38991", "program=" + executablePath, "profile=any", "enable=yes"]
-        ], [ClientWebSocketRule, ClientDiscoveryRule], log);
 
     private static bool ReplaceRules(string[][] rules, string[] names, Action<string> log)
     {
