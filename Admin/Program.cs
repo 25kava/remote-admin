@@ -82,7 +82,7 @@ app.Map("/client", async context =>
     SaveRegistry(registryPath, devices);
     connections[hello.DeviceId] = clientSocket;
     var sendGate = clientSendGates.GetOrAdd(hello.DeviceId, _ => new SemaphoreSlim(1, 1));
-    await SendJson(clientSocket, new ServerHello("serverHello", true, null), sendGate, context.RequestAborted);
+    await SendJson(clientSocket, new ServerHello("serverHello", null), sendGate, context.RequestAborted);
     try
     {
         while (clientSocket.State == WebSocketState.Open)

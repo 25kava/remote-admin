@@ -24,7 +24,7 @@ public sealed record ClientHello(
     string UserName,
     string IpAddress);
 
-public sealed record ServerHello(string Type, bool Accepted, string? Message);
+public sealed record ServerHello(string Type, string? Message);
 
 public sealed record DeviceSnapshot(
     string DeviceId,

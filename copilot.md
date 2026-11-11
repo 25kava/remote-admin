@@ -24,7 +24,7 @@ The solution file is `RemoteAdmin.slnx`.
 - Client WebSocket port: `38992`
 - Admin dashboard: `http://127.0.0.1:38990`
 - Client discovery is broadcast-based and does not use hardcoded Admin IP addresses.
-- Authentication and shared secrets were intentionally removed for this prototype. Any reachable LAN client can connect.
+- Authentication, pairing, shared secrets, and trust verification were intentionally removed for this prototype. Any reachable LAN client can connect. Discovery uses interface-specific IPv4 broadcasts plus the universal broadcast.
 
 The Admin responds to discovery with its LAN address, WebSocket port, and instance ID. The Client connects to every discovered Admin instance and reconnects after failures. Admin persists each device in `%LOCALAPPDATA%\RemoteAdmin\Admin\devices.json`.
 
