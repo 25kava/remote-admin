@@ -34,7 +34,7 @@ try {
         -Protocol UDP `
         -LocalPort 38991 `
         -Program $adminPath `
-        -Profile Domain,Private `
+        -Profile Domain,Private,Public `
         -Enabled True `
         -ErrorAction Stop | Out-Null
 
@@ -45,7 +45,7 @@ try {
         -Protocol TCP `
         -LocalPort 38992 `
         -Program $adminPath `
-        -Profile Domain,Private `
+        -Profile Domain,Private,Public `
         -Enabled True `
         -ErrorAction Stop | Out-Null
 

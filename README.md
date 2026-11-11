@@ -27,7 +27,7 @@ If Windows Firewall previously blocked Admin, run this from the repository folde
 .\repair-firewall.ps1
 ```
 
-The script requests administrator permission through UAC automatically. Approve that prompt. It removes the old blocking `Admin.exe` rules and creates allow rules for UDP `38991` discovery and TCP `38992` client connections on Domain and Private networks. Public-network access remains blocked.
+The script requests administrator permission through UAC automatically. Approve that prompt. It removes the old blocking `Admin.exe` rules and creates allow rules for UDP `38991` discovery and TCP `38992` client connections on Domain, Private, and Public networks.
 
 When `Client.exe` is started from outside `%LOCALAPPDATA%\RemoteAdmin`, it copies itself to `%LOCALAPPDATA%\RemoteAdmin\Client.exe` and starts that copy. The current development build preserves the original executable; the final build should remove it after handoff.
 
