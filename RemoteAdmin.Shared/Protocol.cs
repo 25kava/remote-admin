@@ -9,6 +9,7 @@ public static class Protocol
     public const int ClientPort = 38992;
     public const string DiscoveryRequest = "REMOTE_ADMIN_DISCOVER_V1";
     public const string Product = "RemoteAdmin";
+    public const int ScreenFramesPerSecond = 30;
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull

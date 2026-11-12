@@ -82,21 +82,23 @@ public sealed class ScreenShareSession(
                 finalState = new(requestId, "unavailable", "The sharing indicator could not open, or another Admin is already viewing this screen.");
                 return;
             }
-            using var sharing = CancellationTokenSource.CreateLinkedTokenSource(token, indicator.Revoked);
+            await using var sharing = new SharingLifetime(token, indicator.Revoked);
             Volatile.Write(ref activeScreen, new(requestId, indicator, sharing.Token));
             await sendState(new(requestId, "streaming", "The primary display is being shared. The client has a visible Stop sharing button."), sharing.Token);
             long sequence = 0;
+            var frameInterval = TimeSpan.FromSeconds(1d / Protocol.ScreenFramesPerSecond);
+            using var pacing = new PeriodicTimer(frameInterval);
             while (!sharing.IsCancellationRequested)
             {
                 if (!indicator.IsVisible) throw new InvalidOperationException("The screen sharing indicator is no longer visible.");
-                var started = Environment.TickCount64;
                 var frame = await capture(requestId, ++sequence, sharing.Token);
                 sharing.Token.ThrowIfCancellationRequested();
                 if (!indicator.IsVisible) throw new InvalidOperationException("The screen sharing indicator is no longer visible.");
                 await sendFrame(frame, sharing.Token);
                 // Await each send: slow networks cannot queue an unbounded image backlog.
-                var delay = 200 - (Environment.TickCount64 - started);
-                if (delay > 0) await Task.Delay(TimeSpan.FromMilliseconds(delay), sharing.Token);
+                // Periodic ticks compensate for OS timer jitter and coalesce missed
+                // ticks. A slow capture/send still cannot create a frame backlog.
+                if (!await pacing.WaitForNextTickAsync(sharing.Token)) break;
             }
         }
         catch (OperationCanceledException) { }
@@ -135,4 +137,18 @@ public sealed class ScreenShareSession(
     }
 
     internal sealed record ScreenAccess(string RequestId, IScreenShareLease Indicator, CancellationToken Stopped);
+
+    // Active capture sources must stop before the visible indicator is disposed,
+    // including when capture/encoding throws rather than a user clicking Stop.
+    private sealed class SharingLifetime(CancellationToken first, CancellationToken second) : IAsyncDisposable
+    {
+        private readonly CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(first, second);
+        public CancellationToken Token => source.Token;
+        public bool IsCancellationRequested => source.IsCancellationRequested;
+        public async ValueTask DisposeAsync()
+        {
+            try { await source.CancelAsync(); }
+            finally { source.Dispose(); }
+        }
+    }
 }

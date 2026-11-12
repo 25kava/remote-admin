@@ -1,5 +1,4 @@
 using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
@@ -106,36 +105,6 @@ internal static class DesktopScreenSharing
             }
             finally { revoked.Dispose(); exclusive.Release(); }
         }
-    }
-
-    public static Task<ScreenFrame> CaptureAsync(string requestId, long sequence, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        if (!IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
-        var bounds = Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("No primary display is available.");
-        using var original = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
-        using (var graphics = Graphics.FromImage(original))
-        {
-            graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy);
-            DesktopCursor.Draw(graphics, bounds);
-        }
-        var scale = Math.Min(1d, Math.Min(1280d / bounds.Width, 720d / bounds.Height));
-        var width = Math.Max(1, (int)Math.Round(bounds.Width * scale));
-        var height = Math.Max(1, (int)Math.Round(bounds.Height * scale));
-        using var image = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-        using (var graphics = Graphics.FromImage(image))
-        {
-            graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;
-            graphics.DrawImage(original, 0, 0, width, height);
-        }
-        using var buffer = new MemoryStream();
-        var jpeg = ImageCodecInfo.GetImageEncoders().Single(x => x.FormatID == ImageFormat.Jpeg.Guid);
-        using var parameters = new EncoderParameters(1);
-        parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 65L);
-        image.Save(buffer, jpeg, parameters);
-        token.ThrowIfCancellationRequested();
-        return Task.FromResult(new ScreenFrame(requestId, width, height,
-            Convert.ToBase64String(buffer.GetBuffer(), 0, (int)buffer.Length), sequence, DateTime.UtcNow));
     }
 
     internal static bool IsInteractiveDesktop()

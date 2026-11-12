@@ -116,9 +116,10 @@ static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, str
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
     token = lifetime.Token;
     using var terminal = new TerminalManager(socket, sendGate);
+    using var capture = new DesktopFrameCapture(ClientLog.Write);
     await using var screen = new ScreenShareSession(
         indicatorToken => DesktopScreenSharing.OpenIndicatorAsync(admin, indicatorToken),
-        DesktopScreenSharing.CaptureAsync,
+        capture.CaptureAsync,
         (state, sendToken) => Send(socket, new { type = "screenState", payload = state }, sendGate, sendToken),
         (frame, sendToken) => Send(socket, new { type = "screenFrame", payload = frame }, sendGate, sendToken),
         ClientLog.Write);

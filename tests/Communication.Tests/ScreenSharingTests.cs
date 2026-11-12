@@ -82,6 +82,23 @@ internal static class ScreenSharingTests
             Assert(indicator.Disposed, "Failed capture retained the sharing indicator");
         });
 
+        await test("capture failure cancels its active source before closing the indicator", async () =>
+        {
+            var order = new ConcurrentQueue<string>();
+            var indicator = new Indicator { OnDispose = () => order.Enqueue("indicator") };
+            CancellationTokenRegistration captureStop = default;
+            await using var screen = new ScreenShareSession(_ => Task.FromResult<IScreenShareLease?>(indicator),
+                (_, _, token) =>
+                {
+                    captureStop = token.Register(() => order.Enqueue("capture"));
+                    throw new IOException("Synthetic capture failure");
+                }, (_, _) => Task.CompletedTask, (_, _) => Task.CompletedTask, log);
+            await screen.StartAsync(new("source-lifetime"), CancellationToken.None);
+            await Until(() => indicator.Disposed);
+            captureStop.Dispose();
+            Assert(order.ToArray().SequenceEqual(new[] { "capture", "indicator" }), "An active source outlived the visible indicator");
+        });
+
         await test("a hidden indicator prevents a captured frame from being sent", async () =>
         {
             var indicator = new Indicator();
@@ -117,6 +134,25 @@ internal static class ScreenSharingTests
             Assert(captures == 1, "Image backlog grew while a frame was unsent");
             await screen.StopAsync("slow").WaitAsync(TimeSpan.FromSeconds(2));
             Assert(indicator.Disposed, "Blocked send retained sharing after Stop");
+        });
+
+        await test("screen pacing targets 30 FPS without accumulating frames", async () =>
+        {
+            var indicator = new Indicator();
+            var times = new ConcurrentQueue<long>();
+            await using var screen = Session(indicator, (_, _) =>
+            {
+                times.Enqueue(Stopwatch.GetTimestamp());
+                return Task.CompletedTask;
+            }, log);
+            await screen.StartAsync(new("frame-rate"), CancellationToken.None);
+            await Task.Delay(1200);
+            await screen.StopAsync("frame-rate");
+            var samples = times.ToArray();
+            Assert(samples.Length >= 2, "No paced frames were produced");
+            var fps = (samples.Length - 1) / Stopwatch.GetElapsedTime(samples[0], samples[^1]).TotalSeconds;
+            Assert(fps >= 25 && fps <= 32.5, $"Expected approximately 30 FPS; measured {fps:F1}");
+            Assert(samples.Length <= 42, "Frame count exceeded the target rate");
         });
 
         await test("transport cancellation releases the local screen indicator", async () =>
@@ -279,6 +315,7 @@ internal static class ScreenSharingTests
         public volatile bool Visible = true;
         public bool IsVisible => Visible;
         public bool Disposed;
-        public ValueTask DisposeAsync() { Disposed = true; Stop.Dispose(); return ValueTask.CompletedTask; }
+        public Action? OnDispose;
+        public ValueTask DisposeAsync() { OnDispose?.Invoke(); Disposed = true; Stop.Dispose(); return ValueTask.CompletedTask; }
     }
 }

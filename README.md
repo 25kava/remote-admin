@@ -51,7 +51,7 @@ Selecting a device in the dashboard restarts its CMD session so a previous `exit
 
 ### Live screen
 
-Update both executables to use the live screen panel. Select a connected device and choose **View screen**. The client shares its primary display as JPEG frames, at up to 5 fps and 1280 x 720 pixels, through the existing WebSocket connection. A slow connection does not build an image backlog.
+Update both executables to use the live screen panel. Select a connected device and choose **View screen**. The client shares its primary display as JPEG frames, at up to 30 fps and 1280 x 720 pixels, through the existing WebSocket connection. A slow connection does not build an image backlog.
 
 While sharing, the client shows an always-on-top red circle in the upper-right corner of the primary display. The white stop symbol, hover text and accessible button name identify it as **Stop sharing**. Clicking the circle stops sharing immediately. There is no per-session confirmation dialog. The indicator is shown before capture starts; capture stops if it is hidden or minimized, or if the desktop locks or becomes unavailable. Closing the Admin viewer, changing devices or losing the connection also stops sharing. A new viewing request is required to restart it.
 
@@ -77,3 +77,7 @@ dotnet run --project tests/WindowsInput.Tests -c Release
 ```
 
 Remote control of the Admin computer itself is disabled to prevent injected input from being forwarded back into its own fullscreen viewer. Viewing that computer remains available.
+
+The stream targets 30 FPS using periodic pacing that compensates for OS timer jitter. Capture/encode/send time counts against each frame interval, and a slow send is awaited before capturing again. The dashboard reports the measured incoming FPS; achievable throughput depends on capture hardware and network performance.
+
+On supported Windows systems the client uses GPU-backed Windows Graphics Capture, with the OS cursor and capture border enabled. It keeps only the latest native frame and reuses the current image when the desktop is unchanged. Capture ends before the red stop indicator closes, even on an encoder error. Unsupported drivers/APIs use a reusable, scaled GDI surface as a compatibility path; access-denied errors do not trigger a bypass. The local animated-desktop benchmark reached approximately 28–30 FPS, versus about 10 FPS with the previous capture path.

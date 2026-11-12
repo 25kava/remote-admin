@@ -14,6 +14,7 @@ if(typeof module!=='undefined')module.exports=ScreenGeometry;
 const ScreenView = typeof window==='undefined'?null:(() => {
   let root=null,send=null,supported=false,controlSupported=false,connected=false,requested=false,streaming=false;
   let lastFrame=0,lastSequence=0,frameWidth=0,frameHeight=0,lastMove=0,lastPoint=null;
+  let fpsStarted=0,fpsFrames=0,measuredFps=0;
   let controlRequested=false,controlling=false;
   const el=id=>root?.querySelector('#'+id);
   const fullscreen=()=>!!root&&document.fullscreenElement===el('screenViewport');
@@ -33,7 +34,7 @@ const ScreenView = typeof window==='undefined'?null:(() => {
     controlStatus(message);buttons();
   }
   function clear(message){
-    stopControl();requested=false;streaming=false;lastSequence=0;
+    stopControl();requested=false;streaming=false;lastSequence=0;fpsStarted=0;fpsFrames=0;measuredFps=0;
     const image=el('screenImage');
     if(image){image.hidden=true;image.removeAttribute('src');el('screenPlaceholder').hidden=false;el('screenStatus').textContent=message;}
     buttons();
@@ -49,7 +50,7 @@ const ScreenView = typeof window==='undefined'?null:(() => {
     root=document.createElement('div');root.className='panel';
     root.innerHTML=`<div class="screenHeader"><h3>Live screen</h3><div><button id="screenStart" disabled>View screen</button><button id="screenStop" disabled>Stop viewing</button><button id="screenFullscreen" disabled>Full screen</button></div></div><div id="screenViewport" class="screenViewport" tabindex="0"><div class="screenFsBar"><button id="controlStart" disabled>Enable control</button><button id="controlStop" disabled>Stop control</button><button id="screenExitFullscreen">Exit fullscreen</button><span id="controlStatus" role="status">View only. Enable control to use mouse and keyboard. Escape exits fullscreen.</span></div><img id="screenImage" draggable="false" alt="Live view of the client's primary display, including its mouse pointer" hidden><span id="screenPlaceholder" class="muted screenPlaceholder">The client displays a sharing indicator and a Stop sharing button.</span></div><p id="screenStatus" class="muted" role="status"></p>`;
     content.querySelector('h2').insertAdjacentElement('afterend',root);
-    clear(supported?'Ready. Primary display · up to 5 fps.':'Update Client.exe on this computer to enable screen sharing.');
+    clear(supported?'Ready. Primary display · up to 30 fps.':'Update Client.exe on this computer to enable screen sharing.');
     el('screenStart').onclick=()=>{
       if(!supported||!connected||requested)return;
       clear('Starting the live view…');requested=true;buttons();send({type:'screenStart'});
@@ -121,15 +122,17 @@ const ScreenView = typeof window==='undefined'?null:(() => {
     const p=message.payload;
     if(message.type==='screenState'){
       if(p.status==='streaming'){
-        streaming=true;lastFrame=Date.now();el('screenStatus').textContent='Live · waiting for first frame…';
+        streaming=true;lastFrame=Date.now();fpsStarted=lastFrame;fpsFrames=0;measuredFps=0;el('screenStatus').textContent='Live · waiting for first frame…';
       }else if(p.status==='starting')el('screenStatus').textContent=p.message;
       else clear(p.message||'Screen sharing stopped.');
     }else if(streaming){
       if(typeof p.jpegBase64!=='string'||p.jpegBase64.length>2000000||p.sequence<=lastSequence)return true;
       lastFrame=Date.now();lastSequence=p.sequence;frameWidth=p.width;frameHeight=p.height;
+      fpsFrames++;const fpsElapsed=lastFrame-fpsStarted;
+      if(fpsElapsed>=1000){measuredFps=fpsFrames*1000/fpsElapsed;fpsStarted=lastFrame;fpsFrames=0;}
       const image=el('screenImage');image.src='data:image/jpeg;base64,'+p.jpegBase64;image.hidden=false;
       el('screenPlaceholder').hidden=true;
-      el('screenStatus').textContent=`Live · ${p.width} × ${p.height} · frame ${p.sequence} · ${new Date(p.capturedAtUtc).toLocaleTimeString()}`;buttons();
+      el('screenStatus').textContent=`Live · ${p.width} × ${p.height} · ${measuredFps?measuredFps.toFixed(1)+' fps':'measuring fps…'} · frame ${p.sequence} · ${new Date(p.capturedAtUtc).toLocaleTimeString()}`;buttons();
     }
     return true;
   }
