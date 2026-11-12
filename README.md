@@ -53,7 +53,9 @@ Both processes keep the per-user startup values `RemoteAdminC1` and `RemoteAdmin
 
 To stop both processes immediately, run `release-final\kill-c1-c2.bat`. It stops `c1.exe` and `c2.exe` in one operation, so neither watchdog can restart the other.
 
-There is no uninstall script. To remove the client, delete `%LOCALAPPDATA%\RemoteAdmin`, delete `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard`, and remove the `RemoteAdminC1` and `RemoteAdminC2` values from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The installer also removes an `uninstall.bat` left by earlier builds.
+There is an uninstall script, `release-final\uninstall.bat`. Run it as the target user without elevation. It sets the shared disabled flag, stops `c1.exe` and `c2.exe` together, removes both startup values, clears hidden/system attributes, deletes `%LOCALAPPDATA%\RemoteAdmin` and `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard`, and removes `HKCU\Software\RemoteAdminGuard`. Run elevated on the Admin computer to also delete the Admin firewall rules. Pass `/quiet` for unattended use or `/dry-run` to print the targets without changing anything.
+
+The installer still deletes an `uninstall.bat` left inside the install folder by earlier builds; the supported copy is the one shipped next to the payloads.
 
 
 ### Communication reliability

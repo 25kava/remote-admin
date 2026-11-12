@@ -17,7 +17,7 @@ The payloads are self-contained .NET 10 `win-x64` single-file builds. Git LFS tr
 - `Admin` — ASP.NET Core/Kestrel server, UDP discovery responder, device registry, dashboard, and browser WebSocket relay.
 - `Client` — `c1.exe`, the hidden Windows-subsystem client with UDP discovery, WebSocket client, terminal handling, statistics collection and file-operation handlers.
 - `Watchdog` — `c2.exe`, a trimmed Windows-subsystem process with no networking and no admin features. It only restores or restarts `c1.exe`.
-- `installer` — `install.bat`, the only installer.
+- `installer` — `install.bat` (the only installer) and `uninstall.bat` (removal only).
 
 The solution file is `RemoteAdmin.slnx`.
 
@@ -111,7 +111,8 @@ The plug-and-play requirement is intentional: `c1.exe` and `c2.exe` are self-con
 - Liveness is detected through the named mutexes `RemoteAdmin.C1` and `RemoteAdmin.C2`; no process enumeration or elevation is needed.
 - Every three seconds each supervisor: exits when disabled, ensures both directories and startup entries, repairs its partner's missing executable from the backup, refreshes its partner's backup, and starts a partner whose mutex is absent.
 - `install.bat` sets the disabled flag first, stops old `Client.exe`/`c1.exe`/`c2.exe` processes, clears hidden attributes, replaces both payloads and backups, writes both startup values, clears the flag and starts both processes. It also deletes the legacy `Client.exe`.
-- `uninstall.bat` was removed. To uninstall manually, stop `c1.exe` and `c2.exe`, remove both startup values, then delete `%LOCALAPPDATA%\RemoteAdmin`, `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard` and `HKCU\Software\RemoteAdminGuard`. The installer deletes a legacy `uninstall.bat` left by earlier builds.
+- `uninstall.bat` is the supported removal path. It sets the shared disabled flag first so neither supervisor can restore its partner, stops both payloads in one pass (retrying twice to beat a supervisor tick), drops both `Run` values and the legacy `RemoteAdminClient` value, clears hidden/system attributes, deletes both install folders, and removes `HKCU\Software\RemoteAdminGuard`. Elevated runs also delete the two Admin firewall rules. If a payload file cannot be deleted it leaves the disabled flag set and exits non-zero instead of allowing a partial install to resurrect itself. `/quiet` skips the prompt; `/dry-run` prints the targets.
+- Manual removal remains possible: stop both processes, remove both startup values, then delete `%LOCALAPPDATA%\RemoteAdmin`, `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard` and `HKCU\Software\RemoteAdminGuard`. The installer deletes a legacy `uninstall.bat` left inside the install folder by earlier builds.
 
 ## Current implemented functionality
 
@@ -124,6 +125,7 @@ The plug-and-play requirement is intentional: `c1.exe` and `c2.exe` are self-con
 - CMD terminal process plumbing with streamed output.
 - Basic file upload, download, delete, rename, and execution message handlers in `c1.exe`.
 - Two-way c1/c2 watchdog with backup-based recovery and per-user startup registration.
+- Complete per-user uninstaller that stops both watchdogs at once and removes payloads, backups, startup values and the guard registry key.
 - Hidden client console window and hidden watchdog folder.
 - Browser-to-client WebSocket relay.
 
@@ -135,14 +137,14 @@ The terminal implementation is basic streamed standard I/O rather than a complet
 
 Stopping both client payloads at the same time leaves neither watchdog running until the next logon. The per-user startup entries restore the pair after logoff or reboot.
 
-Preserve the Admin + `c1.exe` + `c2.exe` payload model and the shared layout in `RemoteAdmin.Guard`. `install.bat` is the only installer; do not reintroduce a standalone `Client.exe`. Preserve standard-user execution and do not silently introduce a Windows service or elevated component.
+Preserve the Admin + `c1.exe` + `c2.exe` payload model and the shared layout in `RemoteAdmin.Guard`. `install.bat` is the only installer and `uninstall.bat` only removes; do not reintroduce a standalone `Client.exe`. Preserve standard-user execution and do not silently introduce a Windows service or elevated component.
 
 ## Development rules
 
 - Keep changes surgical and Windows-focused.
 - Prefer existing shared protocol records over duplicated JSON shapes.
 - Preserve the Admin + c1 + c2 payload model and keep the two watchdogs symmetrical.
-- Keep `install.bat` as the only installer. Do not add an uninstaller script.
+- Keep `install.bat` as the only installer. `uninstall.bat` may only remove; it must never install, repair or restore anything.
 - Do not commit credentials, local runtime state, `bin/`, `obj/`, or ordinary publish directories.
 - Update this file when architecture, protocol ports, executable behavior, or build procedures change.
 
