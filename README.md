@@ -51,6 +51,8 @@ The published `Admin.exe` performs its inbound firewall setup automatically on f
 
 Both processes keep the per-user startup values `RemoteAdminC1` and `RemoteAdminC2` present, so a logoff or reboot restores the pair. The installer first sets a shared disabled flag so the running pair cannot fight the upgrade, stops the old client, replaces both payloads and backups, registers both startup values, clears the flag and starts both processes.
 
+To stop both processes immediately, run `release-final\kill-c1-c2.bat`. It stops `c1.exe` and `c2.exe` in one operation, so neither watchdog can restart the other.
+
 There is no uninstall script. To remove the client, delete `%LOCALAPPDATA%\RemoteAdmin`, delete `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard`, and remove the `RemoteAdminC1` and `RemoteAdminC2` values from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The installer also removes an `uninstall.bat` left by earlier builds.
 
 
