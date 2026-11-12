@@ -49,7 +49,8 @@ internal sealed class GpuFrameCapture : IDisposable
             pool.FrameArrived += FrameArrived;
             session = pool.CreateCaptureSession(item);
             session.IsCursorCaptureEnabled = true;
-            // Keep the OS capture border and all platform privacy protections enabled.
+            // Windows 11 otherwise draws a yellow outline around the captured display.
+            session.IsBorderRequired = false;
             token.ThrowIfCancellationRequested();
             session.StartCapture();
             cancellation = token.Register(Dispose);
