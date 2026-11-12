@@ -82,6 +82,22 @@ internal static class RemoteControlTests
             await Until(() => sink.Held == 0 && states.Any(x => x.Status == "stopped"));
         });
 
+        await test("block inputs requires active control and is released when control stops", async () =>
+        {
+            var sink = new Sink(); var states = new ConcurrentQueue<ControlState>(); var blocker = new Blocker();
+            await using var screen = Screen(log);
+            await using var control = Control(screen, sink, states, log, blocker: blocker);
+            Assert(!control.SetBlocked(new("owner", true)).Blocked, "Blocked input before control was active");
+            await Start(screen, control, states);
+            Assert(!control.SetBlocked(new("other", true)).Blocked, "A different request blocked input");
+            Assert(control.SetBlocked(new("owner", true)).Blocked && blocker.Blocked == 1, "Active control did not block local input");
+            Assert(!control.SetBlocked(new("owner", false)).Blocked && blocker.Blocked == 0, "Unblock did not release local input");
+            control.SetBlocked(new("owner", true));
+            await control.StopAsync("owner");
+            await Until(() => blocker.Blocked == 0);
+            Assert(blocker.Blocked == 0, "Stopping control left local input blocked");
+        });
+
         await test("malformed positions, buttons, wheel values and key codes never reach the input sink", async () =>
         {
             var sink = new Sink(); var states = new ConcurrentQueue<ControlState>();
@@ -124,8 +140,8 @@ internal static class RemoteControlTests
     private static ScreenShareSession Screen(Action<string> log) => new(
         (id,sequence,_)=>Task.FromResult(new ScreenFrame(id,1,1,"synthetic",sequence,DateTime.UtcNow)),
         (_,_)=>Task.CompletedTask,(_,_)=>Task.CompletedTask,log);
-    private static RemoteControlSession Control(ScreenShareSession screen,Sink sink,ConcurrentQueue<ControlState> states,Action<string> log,TimeSpan? timeout=null) =>
-        new(screen,sink,(state,_)=>{states.Enqueue(state);return Task.CompletedTask;},log,timeout);
+    private static RemoteControlSession Control(ScreenShareSession screen,Sink sink,ConcurrentQueue<ControlState> states,Action<string> log,TimeSpan? timeout=null,ILocalInputBlocker? blocker=null) =>
+        new(screen,sink,(state,_)=>{states.Enqueue(state);return Task.CompletedTask;},log,timeout,blocker);
     private static async Task Start(ScreenShareSession screen,RemoteControlSession control,ConcurrentQueue<ControlState> states)
     {
         await screen.StartAsync(new("owner"),CancellationToken.None);await Until(()=>screen.IsActive("owner"));
@@ -141,5 +157,10 @@ internal static class RemoteControlTests
         public int Applied;public int Held;public bool Fail;
         public void Apply(InputEvent e){if(Fail)throw new IOException("Synthetic input failure");Interlocked.Increment(ref Applied);if(e.Kind is "keyDown" or "buttonDown")Interlocked.Increment(ref Held);}
         public void ReleaseAll()=>Interlocked.Exchange(ref Held,0);
+    }
+    private sealed class Blocker : ILocalInputBlocker
+    {
+        public int Blocked;
+        public bool SetBlocked(bool blocked){Blocked=blocked?1:0;return true;}
     }
 }

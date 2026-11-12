@@ -42,6 +42,10 @@ using(var graphics=Graphics.FromImage(bitmap))
 var changed=0;
 for(var y=0;y<160;y++)for(var x=0;x<160;x++)if(bitmap.GetPixel(x,y).ToArgb()!=Color.RoyalBlue.ToArgb())changed++;
 Assert(changed>0,"Native cursor was not drawn into the synthetic canvas");
+Assert(WindowsInputBlocker.IsInjected(0x10,keyboard:true),"Injected keyboard input was not recognized");
+Assert(!WindowsInputBlocker.IsInjected(0,keyboard:true),"Physical keyboard input was treated as injected");
+Assert(WindowsInputBlocker.IsInjected(0x01,keyboard:false),"Injected mouse input was not recognized");
+Assert(!WindowsInputBlocker.IsInjected(0x10,keyboard:false),"Keyboard injected flag affected the mouse filter");
 bitmap.Save(Path.Combine(AppContext.BaseDirectory,"cursor-on-synthetic-canvas.png"),ImageFormat.Png);
 Console.WriteLine($"PASS {count} native encoding and cursor assertions; no native mouse/keyboard input was injected.");
 

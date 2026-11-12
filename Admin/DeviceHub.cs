@@ -72,7 +72,7 @@ public sealed class DeviceHub(Action<string> log)
                         message = JsonSerializer.SerializeToUtf8Bytes(new
                         { type = "screenStop", payload = new ScreenStop(browser.ScreenRequestId) }, Protocol.Json);
                     }
-                    else if (type is "controlStart" or "controlStop" or "controlInput" or "controlHeartbeat")
+                    else if (type is "controlStart" or "controlStop" or "controlInput" or "controlHeartbeat" or "controlBlock")
                     {
                         if (type == "controlStop") browser.ControlRequested = false;
                         else if (!browser.ScreenSubscribed || !client.Snapshot.RemoteControlSupported ||
@@ -86,14 +86,29 @@ public sealed class DeviceHub(Action<string> log)
                             continue;
                         }
                         if (type == "controlStart") { browser.ControlRequested = true; browser.ControlStarted = true; }
-                        if (type is "controlInput" or "controlHeartbeat" && !browser.ControlRequested) continue;
-                        message = type == "controlInput"
-                            ? JsonSerializer.SerializeToUtf8Bytes(new
+                        if ((type is "controlInput" or "controlHeartbeat" or "controlBlock") && !browser.ControlRequested) continue;
+                        if (type == "controlInput")
+                        {
+                            message = JsonSerializer.SerializeToUtf8Bytes(new
                             {
                                 type, payload = new ControlInput(browser.ScreenRequestId,
                                     json.RootElement.GetProperty("payload").GetProperty("input").Deserialize<InputEvent>(Protocol.Json)!)
-                            }, Protocol.Json)
-                            : JsonSerializer.SerializeToUtf8Bytes(new { type, payload = new ControlRequest(browser.ScreenRequestId) }, Protocol.Json);
+                            }, Protocol.Json);
+                        }
+                        else if (type == "controlBlock")
+                        {
+                            if (!json.RootElement.GetProperty("payload").TryGetProperty("blocked", out var blocked) ||
+                                blocked.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                                continue;
+                            message = JsonSerializer.SerializeToUtf8Bytes(new
+                            {
+                                type, payload = new ControlBlock(browser.ScreenRequestId, blocked.GetBoolean())
+                            }, Protocol.Json);
+                        }
+                        else
+                        {
+                            message = JsonSerializer.SerializeToUtf8Bytes(new { type, payload = new ControlRequest(browser.ScreenRequestId) }, Protocol.Json);
+                        }
                     }
                     await SendRaw(client.Socket, message, client.SendGate, context.RequestAborted);
                     // Keep cleanup pending until the stop was actually sent. A page
@@ -219,7 +234,7 @@ public sealed class DeviceHub(Action<string> log)
         {
             using var json = JsonDocument.Parse(data);
             if (json.RootElement.TryGetProperty("type", out var type) &&
-                type.GetString() is "screenFrame" or "screenState" or "controlState")
+                type.GetString() is "screenFrame" or "screenState" or "controlState" or "controlBlockState")
             {
                 var requestId = json.RootElement.TryGetProperty("payload", out var payload) &&
                     payload.TryGetProperty("requestId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;

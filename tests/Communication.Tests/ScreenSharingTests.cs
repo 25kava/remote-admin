@@ -189,6 +189,14 @@ internal static class ScreenSharingTests
             Assert(control.RootElement.GetProperty("payload").GetProperty("requestId").GetString() == id, "Control request ID was not bound to its viewer");
             await peer.Send(new { type = "controlState", payload = new ControlState(id, "active") });
             Assert((await Receive(owner, limit.Token)).Contains("active"), "Control state did not reach its viewer");
+            await Send(owner, new { type = "controlBlock", payload = new { fullscreen = true, blocked = true } });
+            using var block = JsonDocument.Parse(await peer.Messages.Reader.ReadAsync(limit.Token));
+            Assert(block.RootElement.GetProperty("type").GetString() == "controlBlock" &&
+                block.RootElement.GetProperty("payload").GetProperty("requestId").GetString() == id &&
+                block.RootElement.GetProperty("payload").GetProperty("blocked").GetBoolean(),
+                "Block request was not bound to its viewer");
+            await peer.Send(new { type = "controlBlockState", payload = new ControlBlockState(id, true) });
+            Assert((await Receive(owner, limit.Token)).Contains("controlBlockState"), "Block state did not reach its viewer");
             await Send(other, new { type = "controlStart", payload = new { fullscreen = true, requestId = id } });
             Assert((await Receive(other, limit.Token)).Contains("unavailable"), "A non-viewing browser acquired control");
             await Send(owner, new { type = "controlInput", payload = new { fullscreen = true, requestId = "spoofed", input = new InputEvent("keyDown",0,0,0,0,"KeyA") } });

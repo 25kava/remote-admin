@@ -74,3 +74,5 @@ public sealed record ScreenFrame(string RequestId, int Width, int Height, string
 public sealed record ControlRequest(string RequestId);
 public sealed record ControlInput(string RequestId, InputEvent Input);
 public sealed record ControlState(string RequestId, string Status, string? Message = null);
+public sealed record ControlBlock(string RequestId, bool Blocked);
+public sealed record ControlBlockState(string RequestId, bool Blocked, string? Message = null);

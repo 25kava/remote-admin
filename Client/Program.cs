@@ -48,8 +48,10 @@ static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, str
         (state, sendToken) => Send(socket, new { type = "screenState", payload = state }, sendGate, sendToken),
         (frame, sendToken) => Send(socket, new { type = "screenFrame", payload = frame }, sendGate, sendToken),
         ClientLog.Write);
+    using var localInputBlocker = new WindowsInputBlocker();
     await using var control = new RemoteControlSession(screen, new WindowsInputSink(),
-        (state, sendToken) => Send(socket, new { type = "controlState", payload = state }, sendGate, sendToken), ClientLog.Write);
+        (state, sendToken) => Send(socket, new { type = "controlState", payload = state }, sendGate, sendToken), ClientLog.Write,
+        localInputBlocker: localInputBlocker);
     Task statsTask = Task.CompletedTask;
     try
     {
@@ -144,6 +146,15 @@ static async Task Handle(JsonElement message, ClientWebSocket socket, TerminalMa
         {
             var request = message.GetProperty("payload").Deserialize<ControlInput>(Protocol.Json);
             if (canControl && request?.Input is not null) control.Apply(request);
+        }
+        else if (type == "controlBlock")
+        {
+            var request = message.GetProperty("payload").Deserialize<ControlBlock>(Protocol.Json)
+                ?? throw new ArgumentException("Missing control block request.");
+            var state = canControl
+                ? control.SetBlocked(request)
+                : new ControlBlockState(request.RequestId, false, "Remote control of the Admin computer itself is disabled.");
+            await Send(socket, new { type = "controlBlockState", payload = state }, sendGate, token);
         }
         else if (type == "fileUpload")
         {

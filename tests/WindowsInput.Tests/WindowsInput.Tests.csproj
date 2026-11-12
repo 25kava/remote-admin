@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="../../RemoteAdmin.Shared/RemoteAdmin.Shared.csproj" />
     <Compile Include="../../Client/WindowsInputSink.cs" Link="WindowsInputSink.cs" />
+    <Compile Include="../../Client/WindowsInputBlocker.cs" Link="WindowsInputBlocker.cs" />
     <Compile Include="../../Client/DesktopCursor.cs" Link="DesktopCursor.cs" />
   </ItemGroup>
 </Project>

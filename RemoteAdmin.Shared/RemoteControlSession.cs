@@ -6,10 +6,15 @@ public interface IRemoteInputSink
     void ReleaseAll();
 }
 
+public interface ILocalInputBlocker
+{
+    bool SetBlocked(bool blocked);
+}
+
 // Input is leased to exactly one existing screen subscription.
 public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInputSink sink,
     Func<ControlState, CancellationToken, Task> sendState, Action<string> log,
-    TimeSpan? heartbeatTimeout = null) : IAsyncDisposable
+    TimeSpan? heartbeatTimeout = null, ILocalInputBlocker? localInputBlocker = null) : IAsyncDisposable
 {
     private readonly object gate = new();
     private ControlSession? current;
@@ -60,6 +65,40 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
                 session.LastHeartbeat = Environment.TickCount64;
     }
 
+    public ControlBlockState SetBlocked(ControlBlock request)
+    {
+        lock (gate)
+        {
+            var session = current;
+            if (session is null || session.Id != request.RequestId || !session.Enabled ||
+                session.Token.IsCancellationRequested || screen.AccessFor(request.RequestId) is null)
+                return new(request.RequestId, false, "Remote control is not active.");
+
+            if (!request.Blocked)
+            {
+                ReleaseLocalBlock();
+                session.Blocked = false;
+                return new(request.RequestId, false);
+            }
+
+            if (session.Blocked) return new(request.RequestId, true);
+            if (localInputBlocker is null)
+                return new(request.RequestId, false, "Local input blocking is unavailable.");
+            try
+            {
+                if (!localInputBlocker.SetBlocked(true))
+                    return new(request.RequestId, false, "Unable to block local input.");
+                session.Blocked = true;
+                return new(request.RequestId, true);
+            }
+            catch (Exception ex)
+            {
+                log($"Local input block failed: {ex.Message}");
+                return new(request.RequestId, false, "Unable to block local input.");
+            }
+        }
+    }
+
     public async Task StopAsync(string id)
     {
         Task task;
@@ -103,11 +142,15 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
         catch (Exception ex) { log($"Remote control ended: {ex.Message}"); }
         finally
         {
+            bool releaseBlock;
             lock (gate)
             {
                 session.Enabled = false;
                 if (ReferenceEquals(current, session)) ReleaseInputs();
+                releaseBlock = session.Blocked;
+                session.Blocked = false;
             }
+            if (releaseBlock) ReleaseLocalBlock();
             try
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -117,6 +160,12 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
             lock (gate) { if (ReferenceEquals(current, session)) current = null; }
             session.Stop.Dispose();
         }
+    }
+
+    private void ReleaseLocalBlock()
+    {
+        try { localInputBlocker?.SetBlocked(false); }
+        catch (Exception ex) { log($"Local input unblock failed: {ex.Message}"); }
     }
 
     private void ReleaseInputs()
@@ -136,6 +185,7 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
             task = monitor;
         }
         await task;
+        ReleaseLocalBlock();
     }
 
     private sealed class ControlSession(string id, CancellationTokenSource stop)
@@ -145,5 +195,6 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
         public CancellationToken Token { get; } = stop.Token;
         public long LastHeartbeat = Environment.TickCount64;
         public bool Enabled;
+        public bool Blocked;
     }
 }

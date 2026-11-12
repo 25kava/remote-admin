@@ -15,7 +15,7 @@ const ScreenView = typeof window==='undefined'?null:(() => {
   let root=null,send=null,supported=false,controlSupported=false,connected=false,requested=false,streaming=false;
   let lastFrame=0,lastSequence=0,frameWidth=0,frameHeight=0,lastMove=0,lastPoint=null;
   let fpsStarted=0,fpsFrames=0,measuredFps=0;
-  let controlRequested=false,controlling=false;
+  let controlRequested=false,controlling=false,inputBlocked=false,blockPending=false;
   const el=id=>root?.querySelector('#'+id);
   const fullscreen=()=>!!root&&document.fullscreenElement===el('screenViewport');
   function controlStatus(text){if(el('controlStatus'))el('controlStatus').textContent=text;}
@@ -26,10 +26,12 @@ const ScreenView = typeof window==='undefined'?null:(() => {
     el('screenFullscreen').disabled=el('screenImage').hidden;
     el('controlStart').disabled=!controlSupported||!fullscreen()||!streaming||!connected||controlRequested;
     el('controlStop').disabled=!controlRequested;
+    const block=el('blockInputs');
+    if(block){block.hidden=!controlling;block.disabled=!controlling||blockPending;block.classList.toggle('active',inputBlocked);block.setAttribute('aria-pressed',String(inputBlocked));}
   }
   function stopControl(message='Remote control stopped.'){
     if(controlRequested)send?.({type:'controlStop'});
-    controlRequested=false;controlling=false;lastPoint=null;
+    controlRequested=false;controlling=false;inputBlocked=false;blockPending=false;lastPoint=null;
     el('screenViewport')?.classList.remove('controlling');
     controlStatus(message);buttons();
   }
@@ -48,7 +50,7 @@ const ScreenView = typeof window==='undefined'?null:(() => {
   function mount(content,canShare,sendMessage,canControl=false){
     stop();send=sendMessage;supported=canShare;controlSupported=canControl;connected=false;
     root=document.createElement('div');root.className='panel';
-    root.innerHTML=`<div class="screenHeader"><h3>Live screen</h3><div><button id="screenStart" disabled>View screen</button><button id="screenStop" disabled>Stop viewing</button><button id="screenFullscreen" disabled>Full screen</button></div></div><div id="screenViewport" class="screenViewport" tabindex="0"><div class="screenFsBar"><button id="controlStart" disabled>Enable control</button><button id="controlStop" disabled>Stop control</button><button id="screenExitFullscreen">Exit fullscreen</button><span id="controlStatus" role="status">View only. Enable control to use mouse and keyboard. Escape exits fullscreen.</span></div><img id="screenImage" draggable="false" alt="Live view of the client's primary display, including its mouse pointer" hidden><span id="screenPlaceholder" class="muted screenPlaceholder">The client displays a sharing indicator and a Stop sharing button.</span></div><p id="screenStatus" class="muted" role="status"></p>`;
+    root.innerHTML=`<div class="screenHeader"><h3>Live screen</h3><div><button id="screenStart" disabled>View screen</button><button id="screenStop" disabled>Stop viewing</button><button id="screenFullscreen" disabled>Full screen</button></div></div><div id="screenViewport" class="screenViewport" tabindex="0"><div class="screenFsBar"><button id="controlStart" disabled>Enable control</button><button id="controlStop" disabled>Stop control</button><button id="blockInputs" hidden aria-pressed="false" title="Block the target's physical mouse and keyboard">Block inputs</button><button id="screenExitFullscreen">Exit fullscreen</button><span id="controlStatus" role="status">View only. Enable control to use mouse and keyboard. Escape exits fullscreen.</span></div><img id="screenImage" draggable="false" alt="Live view of the client's primary display, including its mouse pointer" hidden><span id="screenPlaceholder" class="muted screenPlaceholder">The client shares its primary display silently.</span></div><p id="screenStatus" class="muted" role="status"></p>`;
     content.querySelector('h2').insertAdjacentElement('afterend',root);
     clear(supported?'Ready. Primary display · up to 30 fps.':'Update Client.exe on this computer to enable screen sharing.');
     el('screenStart').onclick=()=>{
@@ -68,6 +70,12 @@ const ScreenView = typeof window==='undefined'?null:(() => {
       send({type:'controlHeartbeat',payload:{fullscreen:true}});
     };
     el('controlStop').onclick=()=>stopControl();
+    el('blockInputs').onclick=()=>{
+      if(!controlling||blockPending||!fullscreen())return;
+      blockPending=true;buttons();
+      send({type:'controlBlock',payload:{fullscreen:true,blocked:!inputBlocked}});
+      el('screenViewport').focus();
+    };
     const viewport=el('screenViewport');
     viewport.addEventListener('pointermove',event=>{
       if(!controlling||!fullscreen())return;
@@ -108,12 +116,21 @@ const ScreenView = typeof window==='undefined'?null:(() => {
     buttons();
   }
   function handle(message){
+    if(message.type==='controlBlockState'){
+      if(!controlRequested)return true;
+      const p=message.payload;
+      inputBlocked=!!p.blocked;blockPending=false;
+      controlStatus(p.message||(inputBlocked?'Target mouse and keyboard are blocked.':'Target input is unblocked.'));
+      buttons();
+      return true;
+    }
     if(message.type==='controlState'){
       if(!controlRequested)return true;
       const p=message.payload;
       if(p.status==='active'&&fullscreen()&&streaming&&connected){
-        controlling=true;el('screenViewport').classList.add('controlling');el('screenViewport').focus();
-        controlStatus('Remote control active · Escape exits · red target button stops everything.');buttons();
+        controlling=true;inputBlocked=false;blockPending=false;
+        el('screenViewport').classList.add('controlling');el('screenViewport').focus();
+        controlStatus('Remote control active · Escape exits · Block inputs locks the target mouse and keyboard.');buttons();
       }else stopControl(p.message||'Remote control stopped.');
       return true;
     }
