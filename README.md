@@ -1,27 +1,59 @@
 # Remote Admin Prototype
 
-Two Windows 11 executables:
+Three Windows 11 runtime payloads plus a batch installer:
 
 - `Admin.exe` - localhost dashboard and LAN server.
-- `Client.exe` - background client that discovers Admin instances and reconnects automatically.
+- `c1.exe` - full background client that discovers Admin instances and reconnects automatically.
+- `c2.exe` - small watchdog that keeps `c1.exe` alive.
+- `install.bat` - the installer distributed instead of a client executable.
 
 ## Build
 
-Requires the .NET 10 SDK:
+Requires the .NET 10 SDK. The quickest path is:
+
+```powershell
+.\build.ps1
+```
+
+The equivalent manual commands are:
 
 ```powershell
 dotnet build RemoteAdmin.slnx
 dotnet publish Admin\Admin.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o release\Admin
-dotnet publish Client\Client.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o release\Client
+dotnet publish Client\Client.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o release\c1
+dotnet publish Watchdog\Watchdog.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o release\c2
+Copy-Item release\Admin\Admin.exe release-final\Admin.exe -Force
+Copy-Item release\c1\c1.exe release-final\c1.exe -Force
+Copy-Item release\c2\c2.exe release-final\c2.exe -Force
+Copy-Item installer\install.bat,installer\uninstall.bat release-final\ -Force
 ```
 
-The repository tracks the final executables with Git LFS, so cloning or pulling the repository materializes `release-final\Admin.exe` and `release-final\Client.exe`. Git LFS must be installed and enabled on the machine performing the clone.
+The repository tracks the final executables with Git LFS, so cloning or pulling the repository materializes `release-final\Admin.exe`, `release-final\c1.exe` and `release-final\c2.exe`. Git LFS must be installed and enabled on the machine performing the clone.
 
 This prototype intentionally has no login, pairing, trust verification, or client authentication. Any client that can reach the Admin LAN port can connect. Discovery sends to both interface-specific IPv4 broadcasts and the universal broadcast to work across more LAN configurations.
 
 The Admin only lists currently connected clients; disconnected clients are not retained. Each client stores its system notes in `%LOCALAPPDATA%\RemoteAdmin\system-notes.txt`, and the Admin dashboard can read and update those notes.
 
-The published `Admin.exe` performs its inbound firewall setup automatically on first run and may show one UAC prompt. `Client.exe` only makes outbound UDP/TCP connections, so it does not configure firewall rules, request elevation, or require administrator privileges.
+The published `Admin.exe` performs its inbound firewall setup automatically on first run and may show one UAC prompt. `c1.exe` only makes outbound UDP/TCP connections, and `c2.exe` uses no network at all, so neither client process configures firewall rules, requests elevation, or requires administrator privileges.
+
+## Client installation and two-way watchdog
+
+`Client.exe` no longer exists. The client is distributed as `install.bat` together with `c1.exe`, `c2.exe` and `uninstall.bat`. Run `install.bat` from the folder that contains those files, as the target user and without elevation.
+
+| Path | Purpose |
+| --- | --- |
+| `%LOCALAPPDATA%\RemoteAdmin\c1.exe` | Full client. |
+| `%LOCALAPPDATA%\RemoteAdmin\uninstall.bat` | Visible uninstaller next to `c1.exe`. |
+| `%LOCALAPPDATA%\RemoteAdmin\c2.bak` | Hidden, system-marked backup of `c2.exe`. |
+| `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard\c2.exe` | Hidden, system-marked watchdog. |
+| `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard\c1.bak` | Hidden, system-marked backup of `c1.exe`. |
+
+`c1.exe` and `c2.exe` are two-way watchdogs. Every three seconds each process checks its partner through a named mutex. If the partner executable is missing, it is rebuilt from the backup that lives on the other side of the pair; if it is not running, it is started again. `c1.exe` is the full client and keeps all previous client behavior, including discovery, terminal, notes, statistics, screen sharing and remote control. `c2.exe` is a trimmed build with no networking or admin features; its only job is to look after `c1.exe`.
+
+Both processes keep the per-user startup values `RemoteAdminC1` and `RemoteAdminC2` present, so a logoff or reboot restores the pair. The installer first sets a shared disabled flag so the running pair cannot fight the upgrade, stops the old client, replaces both payloads and backups, registers both startup values, clears the flag and starts both processes.
+
+The installed `uninstall.bat` sets the same disabled flag, removes both startup values, stops both processes, deletes the binaries, backups, device ID, notes, logs and the hidden watchdog folder, and removes the shared registry key. Admin logs under `%LOCALAPPDATA%\RemoteAdmin\Admin` are preserved; delete that folder manually if a complete wipe is wanted. `c1.exe` also recreates `uninstall.bat` from an embedded copy if the script is deleted.
+
 
 ### Communication reliability
 
@@ -41,9 +73,7 @@ dotnet run --project tests/Communication.Tests -c Release
 dotnet run --project tests/Communication.Tests -c Release -- --live --soak
 ```
 
-The client does not configure inbound or outbound firewall rules and never starts an elevated process. Only the Admin requires inbound firewall access because it listens for discovery and client WebSocket connections.
-
-When `Client.exe` is started from outside `%LOCALAPPDATA%\RemoteAdmin`, it copies itself to `%LOCALAPPDATA%\RemoteAdmin\Client.exe` and starts that copy. The current development build preserves the original executable; the final build should remove it after handoff.
+The client payloads do not configure inbound or outbound firewall rules and never start an elevated process. Only the Admin requires inbound firewall access because it listens for discovery and client WebSocket connections.
 
 Remote terminal sessions start in the logged-in user's profile directory by default (`%USERPROFILE%`).
 The client starts one CMD session automatically for each Admin connection; the dashboard does not expose start or stop controls.
@@ -51,13 +81,13 @@ Selecting a device in the dashboard restarts its CMD session so a previous `exit
 
 ### Live screen
 
-Update both executables to use the live screen panel. Select a connected device and choose **View screen**. The client shares its primary display as JPEG frames, at up to 30 fps and 1280 x 720 pixels, through the existing WebSocket connection. A slow connection does not build an image backlog.
+Update `Admin.exe` and `c1.exe` to use the live screen panel. Select a connected device and choose **View screen**. The client shares its primary display as JPEG frames, at up to 30 fps and 1280 x 720 pixels, through the existing WebSocket connection. A slow connection does not build an image backlog.
 
 While sharing, the client shows an always-on-top red circle in the upper-right corner of the primary display. The white stop symbol, hover text and accessible button name identify it as **Stop sharing**. Clicking the circle stops sharing immediately. There is no per-session confirmation dialog. The indicator is shown before capture starts; capture stops if it is hidden or minimized, or if the desktop locks or becomes unavailable. Closing the Admin viewer, changing devices or losing the connection also stops sharing. A new viewing request is required to restart it.
 
-Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update Client.exe before screen viewing is available. The dashboard and its screen-view script are embedded in Admin.exe; no extra runtime files are required.
+Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update `c1.exe` before screen viewing is available. The dashboard and its screen-view script are embedded in Admin.exe; no extra runtime files are required.
 
-Client targets `net10.0-windows` with Windows Forms for the visible stop indicator and Windows desktop capture. The published executables remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate indicator gating, local Stop, viewer isolation, cancellation and backpressure without starting a terminal or changing startup registration.
+`c1.exe` targets `net10.0-windows` with Windows Forms for the visible stop indicator and Windows desktop capture. The published payloads remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate indicator gating, local Stop, viewer isolation, cancellation and backpressure without starting a terminal or changing startup registration.
 
 ### Target cursor and fullscreen control
 
@@ -67,7 +97,7 @@ For unattended control of your own computers, open **View screen**, choose **Ful
 
 **Stop control** returns to view-only mode. Escape or **Exit fullscreen**, loss of Admin window focus, a hidden tab, a connection failure or stopping screen sharing releases the keys/buttons held by this session. Control requires a heartbeat every 500 ms and ends after 2.5 seconds without one. It never resumes automatically after interruption. Other browser viewers cannot inject input into the owner's screen session. Image letterboxing is excluded from coordinate mapping, and multiple-monitor virtual desktop origins are handled correctly.
 
-Update both executables for control support; older clients can still be viewed but do not advertise remote control. Windows elevation boundaries, UAC/secure desktop and browser-reserved shortcuts remain unavailable. The target's local input is never blocked. Keyboard mapping uses physical key codes and the target's keyboard layout.
+Update `Admin.exe` and `c1.exe` for control support; older clients can still be viewed but do not advertise remote control. Windows elevation boundaries, UAC/secure desktop and browser-reserved shortcuts remain unavailable. The target's local input is never blocked. Keyboard mapping uses physical key codes and the target's keyboard layout.
 
 Additional checks (native input is replaced by a fake API during tests):
 

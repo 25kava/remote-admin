@@ -1,2 +1,4 @@
 release-final/Admin.exe filter=lfs diff=lfs merge=lfs -text
-release-final/Client.exe filter=lfs diff=lfs merge=lfs -text
+release-final/c1.exe filter=lfs diff=lfs merge=lfs -text
+release-final/c2.exe filter=lfs diff=lfs merge=lfs -text
+*.bat text eol=crlf

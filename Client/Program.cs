@@ -5,103 +5,29 @@ using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using RemoteAdmin.Guard;
 using RemoteAdmin.Shared;
 
-var appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAdmin");
+var appData = GuardPaths.LocalRoot;
 Directory.CreateDirectory(appData);
-var logPath = Path.Combine(appData, "Client.log");
-ClientLog.Path = logPath;
-var removeOriginalAfterRelocation = false;
-var relocation = RelocationInfo.Parse(args);
-if (relocation is not null)
-    WaitForParentExit(relocation.ParentProcessId);
+ClientLog.Path = Path.Combine(appData, "Client.log");
 
-using var mutex = new Mutex(false, "RemoteAdmin.Client");
-var ownsMutex = false;
-try
-{
-    ownsMutex = mutex.WaitOne(0);
-}
-catch (AbandonedMutexException)
-{
-    ownsMutex = true;
-}
+using var instance = SingleInstance.Acquire(GuardPaths.C1MutexName);
+if (!instance.Owned) return;
 
-if (!ownsMutex) return;
-
-if (relocation is not null)
-{
-    if (removeOriginalAfterRelocation)
-    {
-        var originalRemoved = TryDeleteOriginal(relocation.SourcePath);
-        if (!originalRemoved)
-            ClientLog.Write($"Unable to remove the original client executable: {relocation.SourcePath}");
-    }
-}
-else if (!IsUnderDirectory(Environment.ProcessPath, appData))
-{
-    var targetPath = Path.Combine(appData, "Client.exe");
-    File.Copy(Environment.ProcessPath!, targetPath, true);
-    var child = Process.Start(new ProcessStartInfo
-    {
-        FileName = targetPath,
-        Arguments = $"--relocated-from \"{Environment.ProcessPath}\" --parent-pid {Environment.ProcessId}",
-        UseShellExecute = false,
-        CreateNoWindow = true
-    });
-
-    if (child is null)
-        throw new InvalidOperationException("Unable to start the relocated client.");
-
-    mutex.ReleaseMutex();
-    return;
-}
-
-ClientLog.Write("Client started.");
+ClientLog.Write("c1 started.");
 var deviceIdPath = Path.Combine(appData, "device.id");
 var deviceId = File.Exists(deviceIdPath) ? File.ReadAllText(deviceIdPath) : Guid.NewGuid().ToString("N");
 File.WriteAllText(deviceIdPath, deviceId);
 var notesPath = Path.Combine(appData, "system-notes.txt");
 if (!File.Exists(notesPath)) File.WriteAllText(notesPath, "");
 var stopping = new CancellationTokenSource();
-_ = Task.Run(() => StartupRegistration(appData));
+await using var guard = new GuardSupervisor(GuardRole.C1, ClientLog.Write, stopping);
+guard.Start();
 await ConnectionSupervisor.RunAsync(
     token => LanDiscovery.FindAsync(ClientLog.Write, token),
     (server, token) => Connect(server, deviceId, notesPath, token),
     ClientLog.Write, stopping.Token);
-
-static bool IsUnderDirectory(string? filePath, string directory)
-{
-    if (string.IsNullOrWhiteSpace(filePath)) return false;
-    var file = Path.GetFullPath(filePath);
-    var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-    return file.StartsWith(root, StringComparison.OrdinalIgnoreCase);
-}
-
-static void WaitForParentExit(int processId)
-{
-    try
-    {
-        using var parent = Process.GetProcessById(processId);
-        parent.WaitForExit(TimeSpan.FromSeconds(10));
-    }
-    catch (ArgumentException) { }
-    catch (InvalidOperationException) { }
-}
-
-static bool TryDeleteOriginal(string path)
-{
-    try
-    {
-        if (!File.Exists(path)) return true;
-        File.Delete(path);
-        return !File.Exists(path);
-    }
-    catch
-    {
-        return false;
-    }
-}
 
 static Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
 {
@@ -313,12 +239,6 @@ static async Task<byte[]?> ReceiveMessage(WebSocket socket, CancellationToken to
         if (result.EndOfMessage) return message.ToArray();
     }
 }
-static async Task StartupRegistration(string root)
-{
-    using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run", true);
-    key?.SetValue("RemoteAdminClient", Environment.ProcessPath);
-    await Task.CompletedTask;
-}
 
 sealed class TerminalManager : IDisposable
 {
@@ -474,20 +394,5 @@ static class NativeStats
         public ulong TotalVirtual;
         public ulong AvailableVirtual;
         public ulong AvailableExtendedVirtual;
-    }
-}
-
-sealed record RelocationInfo(string SourcePath, int ParentProcessId)
-{
-    public static RelocationInfo? Parse(string[] args)
-    {
-        if (args.Length != 4 ||
-            !string.Equals(args[0], "--relocated-from", StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(args[2], "--parent-pid", StringComparison.OrdinalIgnoreCase) ||
-            !int.TryParse(args[3], out var parentProcessId) ||
-            string.IsNullOrWhiteSpace(args[1]))
-            return null;
-
-        return new RelocationInfo(args[1], parentProcessId);
     }
 }

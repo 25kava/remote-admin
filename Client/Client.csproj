@@ -2,10 +2,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RemoteAdmin.Shared\RemoteAdmin.Shared.csproj" />
+    <ProjectReference Include="..\RemoteAdmin.Guard\RemoteAdmin.Guard.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <AssemblyName>c1</AssemblyName>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
