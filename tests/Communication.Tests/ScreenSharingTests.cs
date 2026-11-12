@@ -10,141 +10,81 @@ internal static class ScreenSharingTests
     public static async Task RunAsync(Func<string, Func<Task>, Task> test, int port,
         Func<Task<DeviceSnapshot[]?>> devices, Action<string> log)
     {
-        await test("screen capture cannot start before the visible sharing indicator and pending requests can be cancelled", async () =>
+        await test("a pending screen request can be cancelled before it sends frames", async () =>
         {
-            var captureCount = 0;
-            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var captureStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var states = new ConcurrentQueue<ScreenShareState>();
-            await using var screen = new ScreenShareSession(async token =>
-            {
-                waiting.TrySetResult();
-                await Task.Delay(Timeout.Infinite, token);
-                return null;
-            }, (id, sequence, _) => { Interlocked.Increment(ref captureCount); return Task.FromResult(Frame(id, sequence)); },
-                (state, _) => { states.Enqueue(state); return Task.CompletedTask; }, (_, _) => Task.CompletedTask, log);
-            await screen.StartAsync(new("pending"), CancellationToken.None);
-            await waiting.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Assert(captureCount == 0, "Captured pixels before indicator");
-            await screen.StopAsync("pending");
-            Assert(captureCount == 0 && states.Last().Status == "stopped", "Cancelled request started capture");
-        });
-
-        await test("an unavailable screen indicator sends no frames", async () =>
-        {
-            var states = new ConcurrentQueue<ScreenShareState>();
-            await using var screen = new ScreenShareSession(_ => Task.FromResult<IScreenShareLease?>(null),
-                (_, _, _) => throw new Exception("Capture must not run without an indicator"),
-                (state, _) => { states.Enqueue(state); return Task.CompletedTask; },
-                (_, _) => throw new Exception("Frame must not be sent without an indicator"), log);
-            await screen.StartAsync(new("unavailable"), CancellationToken.None);
-            await Until(() => states.Any(x => x.Status == "unavailable"));
-        });
-
-        await test("local Stop revokes sharing, releases the indicator and prevents later frames", async () =>
-        {
-            var indicator = new Indicator();
             var frames = 0;
-            await using var screen = Session(indicator, (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
-            await screen.StartAsync(new("local-stop"), CancellationToken.None);
-            await Until(() => frames > 0);
-            indicator.Stop.Cancel();
-            await Until(() => indicator.Disposed);
-            var previous = frames;
-            await Task.Delay(300);
-            Assert(frames == previous, "Pixels sent after local Stop");
+            await using var screen = new ScreenShareSession(
+                async (id, sequence, token) =>
+                {
+                    captureStarted.TrySetResult();
+                    await Task.Delay(Timeout.Infinite, token);
+                    return Frame(id, sequence);
+                },
+                (state, _) => { states.Enqueue(state); return Task.CompletedTask; },
+                (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
+            await screen.StartAsync(new("pending"), CancellationToken.None);
+            await captureStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await screen.StopAsync("pending");
+            Assert(frames == 0 && states.Last().Status == "stopped", "Cancelled request sent frames");
         });
 
         await test("another viewer cannot stop or replace an active screen session", async () =>
         {
-            var indicator = new Indicator();
             var frames = 0;
-            await using var screen = Session(indicator, (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
+            var states = new ConcurrentQueue<ScreenShareState>();
+            await using var screen = new ScreenShareSession(
+                (id, sequence, _) => Task.FromResult(Frame(id, sequence)),
+                (state, _) => { states.Enqueue(state); return Task.CompletedTask; },
+                (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
             await screen.StartAsync(new("owner"), CancellationToken.None);
             await Until(() => frames > 0);
             await screen.StartAsync(new("other"), CancellationToken.None);
             await screen.StopAsync("other");
             var before = frames;
             await Until(() => frames > before);
-            Assert(!indicator.Disposed, "Another viewer stopped sharing");
             await screen.StopAsync("owner");
-            Assert(indicator.Disposed, "Owner Stop did not release sharing");
+            await Until(() => states.Any(x => x.Status == "stopped"));
         });
 
-        await test("screen capture failure closes the indicator lease and reports an error", async () =>
+        await test("screen capture failure reports an error", async () =>
         {
-            var indicator = new Indicator();
             var states = new ConcurrentQueue<ScreenShareState>();
-            await using var screen = new ScreenShareSession(_ => Task.FromResult<IScreenShareLease?>(indicator),
+            await using var screen = new ScreenShareSession(
                 (_, _, _) => throw new IOException("Synthetic locked desktop"),
-                (state, _) => { states.Enqueue(state); return Task.CompletedTask; }, (_, _) => Task.CompletedTask, log);
+                (state, _) => { states.Enqueue(state); return Task.CompletedTask; },
+                (_, _) => Task.CompletedTask, log);
             await screen.StartAsync(new("failure"), CancellationToken.None);
             await Until(() => states.Any(x => x.Status == "error"));
-            Assert(indicator.Disposed, "Failed capture retained the sharing indicator");
-        });
-
-        await test("capture failure cancels its active source before closing the indicator", async () =>
-        {
-            var order = new ConcurrentQueue<string>();
-            var indicator = new Indicator { OnDispose = () => order.Enqueue("indicator") };
-            CancellationTokenRegistration captureStop = default;
-            await using var screen = new ScreenShareSession(_ => Task.FromResult<IScreenShareLease?>(indicator),
-                (_, _, token) =>
-                {
-                    captureStop = token.Register(() => order.Enqueue("capture"));
-                    throw new IOException("Synthetic capture failure");
-                }, (_, _) => Task.CompletedTask, (_, _) => Task.CompletedTask, log);
-            await screen.StartAsync(new("source-lifetime"), CancellationToken.None);
-            await Until(() => indicator.Disposed);
-            captureStop.Dispose();
-            Assert(order.ToArray().SequenceEqual(new[] { "capture", "indicator" }), "An active source outlived the visible indicator");
-        });
-
-        await test("a hidden indicator prevents a captured frame from being sent", async () =>
-        {
-            var indicator = new Indicator();
-            var capturing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var frames = 0;
-            await using var screen = new ScreenShareSession(_ => Task.FromResult<IScreenShareLease?>(indicator),
-                async (id, sequence, token) =>
-                {
-                    capturing.TrySetResult();
-                    await finish.Task.WaitAsync(token);
-                    return Frame(id, sequence);
-                }, (_, _) => Task.CompletedTask, (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
-            await screen.StartAsync(new("hidden"), CancellationToken.None);
-            await capturing.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            indicator.Visible = false;
-            finish.SetResult();
-            await Until(() => indicator.Disposed);
-            Assert(frames == 0, "An image was sent while the indicator was hidden");
         });
 
         await test("slow screen sends do not queue captures and Stop cancels the blocked send", async () =>
         {
-            var indicator = new Indicator();
             var captures = 0;
             var sending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await using var screen = new ScreenShareSession(_ => Task.FromResult<IScreenShareLease?>(indicator),
+            await using var screen = new ScreenShareSession(
                 (id, sequence, _) => { Interlocked.Increment(ref captures); return Task.FromResult(Frame(id, sequence)); },
-                (_, _) => Task.CompletedTask, async (_, token) => { sending.TrySetResult(); await Task.Delay(Timeout.Infinite, token); }, log);
+                (_, _) => Task.CompletedTask,
+                async (_, token) => { sending.TrySetResult(); await Task.Delay(Timeout.Infinite, token); }, log);
             await screen.StartAsync(new("slow"), CancellationToken.None);
             await sending.Task.WaitAsync(TimeSpan.FromSeconds(2));
             await Task.Delay(450);
             Assert(captures == 1, "Image backlog grew while a frame was unsent");
             await screen.StopAsync("slow").WaitAsync(TimeSpan.FromSeconds(2));
-            Assert(indicator.Disposed, "Blocked send retained sharing after Stop");
+            Assert(!screen.IsActive("slow"), "Stopped session remained active");
         });
 
         await test("screen pacing targets 30 FPS without accumulating frames", async () =>
         {
-            var indicator = new Indicator();
             var times = new ConcurrentQueue<long>();
-            await using var screen = Session(indicator, (_, _) =>
-            {
-                times.Enqueue(Stopwatch.GetTimestamp());
-                return Task.CompletedTask;
-            }, log);
+            await using var screen = new ScreenShareSession(
+                (id, sequence, _) =>
+                {
+                    times.Enqueue(Stopwatch.GetTimestamp());
+                    return Task.FromResult(Frame(id, sequence));
+                },
+                (_, _) => Task.CompletedTask, (_, _) => Task.CompletedTask, log);
             await screen.StartAsync(new("frame-rate"), CancellationToken.None);
             await Task.Delay(1200);
             await screen.StopAsync("frame-rate");
@@ -155,27 +95,29 @@ internal static class ScreenSharingTests
             Assert(samples.Length <= 42, "Frame count exceeded the target rate");
         });
 
-        await test("transport cancellation releases the local screen indicator", async () =>
+        await test("transport cancellation ends sharing without further frames", async () =>
         {
             using var stop = new CancellationTokenSource();
-            var indicator = new Indicator();
             var frames = 0;
-            await using var screen = Session(indicator, (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
+            await using var screen = new ScreenShareSession(
+                (id, sequence, _) => Task.FromResult(Frame(id, sequence)),
+                (_, _) => Task.CompletedTask,
+                (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
             await screen.StartAsync(new("disconnect"), stop.Token);
             await Until(() => frames > 0);
             stop.Cancel();
-            await Until(() => indicator.Disposed);
+            var previous = frames;
+            await Task.Delay(300);
+            Assert(frames == previous, "Pixels were sent after transport cancellation");
+            Assert(!screen.IsActive("disconnect"), "Transport cancellation left an active session");
         });
 
-        await test("each new screen session opens a new visible sharing indicator", async () =>
+        await test("a new request can stream after the previous session stops", async () =>
         {
-            var indicators = 0;
             var frames = 0;
-            await using var screen = new ScreenShareSession(_ =>
-            {
-                Interlocked.Increment(ref indicators);
-                return Task.FromResult<IScreenShareLease?>(new Indicator());
-            }, (id, sequence, _) => Task.FromResult(Frame(id, sequence)), (_, _) => Task.CompletedTask,
+            await using var screen = new ScreenShareSession(
+                (id, sequence, _) => Task.FromResult(Frame(id, sequence)),
+                (_, _) => Task.CompletedTask,
                 (_, _) => { Interlocked.Increment(ref frames); return Task.CompletedTask; }, log);
             await screen.StartAsync(new("first"), CancellationToken.None);
             await Until(() => frames > 0);
@@ -183,7 +125,6 @@ internal static class ScreenSharingTests
             var previous = frames;
             await screen.StartAsync(new("second"), CancellationToken.None);
             await Until(() => frames > previous);
-            Assert(indicators == 2, "Previous indicator was reused");
             await screen.StopAsync("second");
         });
 
@@ -277,9 +218,6 @@ internal static class ScreenSharingTests
         await UntilAsync(async () => (await devices())!.Length == 0);
     }
 
-    private static ScreenShareSession Session(Indicator indicator, Func<ScreenFrame, CancellationToken, Task> send, Action<string> log) =>
-        new(_ => Task.FromResult<IScreenShareLease?>(indicator),
-            (id, sequence, _) => Task.FromResult(Frame(id, sequence)), (_, _) => Task.CompletedTask, send, log);
     private static ScreenFrame Frame(string id, long sequence) => new(id, 640, 360, "synthetic-test-pixels", sequence, DateTime.UtcNow);
     private static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }
     private static async Task Until(Func<bool> check) => await UntilAsync(() => Task.FromResult(check()));
@@ -307,15 +245,5 @@ internal static class ScreenSharingTests
             message.Write(buffer, 0, frame.Count);
         } while (!frame.EndOfMessage);
         return Encoding.UTF8.GetString(message.ToArray());
-    }
-    private sealed class Indicator : IScreenShareLease
-    {
-        public CancellationTokenSource Stop { get; } = new();
-        public CancellationToken Revoked => Stop.Token;
-        public volatile bool Visible = true;
-        public bool IsVisible => Visible;
-        public bool Disposed;
-        public Action? OnDispose;
-        public ValueTask DisposeAsync() { OnDispose?.Invoke(); Disposed = true; Stop.Dispose(); return ValueTask.CompletedTask; }
     }
 }

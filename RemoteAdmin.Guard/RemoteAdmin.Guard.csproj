@@ -6,8 +6,4 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
-  <ItemGroup>
-    <EmbeddedResource Include="..\installer\uninstall.bat" LogicalName="RemoteAdmin.Guard.uninstall.bat" />
-  </ItemGroup>
-
 </Project>

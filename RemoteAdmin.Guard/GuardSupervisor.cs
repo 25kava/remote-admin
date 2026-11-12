@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using Microsoft.Win32;
 
 namespace RemoteAdmin.Guard;
@@ -12,7 +11,6 @@ namespace RemoteAdmin.Guard;
 public sealed class GuardSupervisor : IAsyncDisposable
 {
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(3);
-    private const string UninstallResourceName = "RemoteAdmin.Guard.uninstall.bat";
 
     private readonly GuardRole role;
     private readonly Action<string> log;
@@ -57,7 +55,6 @@ public sealed class GuardSupervisor : IAsyncDisposable
                 EnsureDirectory(GuardPaths.LocalRoot, hide: false);
                 EnsureDirectory(GuardPaths.C2Root, hide: true);
                 EnsureStartupEntries();
-                if (role == GuardRole.C1) EnsureUninstallScript();
                 HealSibling();
             }
             catch (Exception ex)
@@ -226,33 +223,6 @@ public sealed class GuardSupervisor : IAsyncDisposable
             var value = $"\"{path}\"";
             if (!string.Equals(key.GetValue(name) as string, value, StringComparison.Ordinal))
                 key.SetValue(name, value, RegistryValueKind.String);
-        }
-    }
-
-    /// <summary>
-    /// Keeps the visible uninstaller next to c1.exe and repairs it if it is removed.
-    /// The installer embeds the same script from the installer folder.
-    /// </summary>
-    private static void EnsureUninstallScript()
-    {
-        if (File.Exists(GuardPaths.UninstallPath)) return;
-
-        using var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream(UninstallResourceName);
-        if (resource is null) return;
-
-        using var buffer = new MemoryStream();
-        resource.CopyTo(buffer);
-        var wanted = buffer.ToArray();
-
-        try
-        {
-            var temporaryPath = GuardPaths.UninstallPath + ".tmp";
-            File.WriteAllBytes(temporaryPath, wanted);
-            File.Move(temporaryPath, GuardPaths.UninstallPath, true);
-        }
-        catch (Exception)
-        {
-            // The uninstaller being temporarily locked must never break the client.
         }
     }
 }

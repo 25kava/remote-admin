@@ -25,7 +25,7 @@ internal sealed class GpuFrameCapture : IDisposable
     public GpuFrameCapture(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!DesktopScreenSharing.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
+        if (!DesktopAccess.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
         if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("Windows Graphics Capture is unavailable.");
         try
         {
@@ -60,7 +60,7 @@ internal sealed class GpuFrameCapture : IDisposable
     public async Task<ScreenFrame> CaptureAsync(string id, long sequence, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!DesktopScreenSharing.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
+        if (!DesktopAccess.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
         Direct3D11CaptureFrame? frame;
         Task wait;
         string? cached;

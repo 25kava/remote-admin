@@ -45,7 +45,7 @@ Assert(changed>0,"Native cursor was not drawn into the synthetic canvas");
 bitmap.Save(Path.Combine(AppContext.BaseDirectory,"cursor-on-synthetic-canvas.png"),ImageFormat.Png);
 Console.WriteLine($"PASS {count} native encoding and cursor assertions; no native mouse/keyboard input was injected.");
 
-internal static class DesktopScreenSharing
+internal static class DesktopAccess
 {
     public static bool IsInteractiveDesktop()=>false; // Prevent actual injection if a test omits its fake API.
 }

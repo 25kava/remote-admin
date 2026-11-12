@@ -13,7 +13,7 @@ internal sealed class WindowsInputSink(
     public void Apply(InputEvent input)
     {
         if (!RemoteInputRules.IsValid(input)) throw new ArgumentException("Unsupported input event.");
-        if (!(desktopAvailable?.Invoke() ?? DesktopScreenSharing.IsInteractiveDesktop())) throw new InvalidOperationException("The desktop is not available for input.");
+        if (!(desktopAvailable?.Invoke() ?? DesktopAccess.IsInteractiveDesktop())) throw new InvalidOperationException("The desktop is not available for input.");
         if (input.Kind is "keyDown" or "keyUp")
         {
             var down = input.Kind == "keyDown";
@@ -44,7 +44,7 @@ internal sealed class WindowsInputSink(
         var releases = keys.Select(key => Key(key, false))
             .Concat(buttons.Select(button => Mouse(0, 0, 0, ButtonFlag(button, false)))).ToArray();
         keys.Clear(); buttons.Clear();
-        if (releases.Length > 0 && (desktopAvailable?.Invoke() ?? DesktopScreenSharing.IsInteractiveDesktop())) Send(releases);
+        if (releases.Length > 0 && (desktopAvailable?.Invoke() ?? DesktopAccess.IsInteractiveDesktop())) Send(releases);
     }
 
     private static uint ButtonFlag(int button, bool down) => (button, down) switch

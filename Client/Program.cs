@@ -34,17 +34,16 @@ static Task Connect(DiscoveryAnnouncement server, string deviceId, string notesP
     var canControl = !LanDiscovery.IsLocalAddress(server.Host);
     var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp(), true, canControl);
     return ClientTransport.RunAsync(server, hello,
-        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, $"{server.Host}:{server.Port}", canControl, sessionToken), ClientLog.Write, token);
+        (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, canControl, sessionToken), ClientLog.Write, token);
 }
 
-static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, string admin, bool canControl, CancellationToken token)
+static async Task RunSession(ClientWebSocket socket, SemaphoreSlim sendGate, string notesPath, bool canControl, CancellationToken token)
 {
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
     token = lifetime.Token;
     using var terminal = new TerminalManager(socket, sendGate);
     using var capture = new DesktopFrameCapture(ClientLog.Write);
     await using var screen = new ScreenShareSession(
-        indicatorToken => DesktopScreenSharing.OpenIndicatorAsync(admin, indicatorToken),
         capture.CaptureAsync,
         (state, sendToken) => Send(socket, new { type = "screenState", payload = state }, sendGate, sendToken),
         (frame, sendToken) => Send(socket, new { type = "screenFrame", payload = frame }, sendGate, sendToken),

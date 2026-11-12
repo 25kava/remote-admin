@@ -7,7 +7,7 @@ public enum GuardRole
 }
 
 /// <summary>
-/// Canonical installation layout shared by c1.exe, c2.exe, the installer and the uninstaller.
+/// Canonical installation layout shared by c1.exe, c2.exe and the installer.
 /// c1.exe lives in the visible RemoteAdmin folder; c2.exe lives in a hidden, system-marked
 /// folder so the two binaries are never stored together.
 /// </summary>
@@ -18,7 +18,6 @@ public static class GuardPaths
 
     public static string C1Path => Path.Combine(LocalRoot, "c1.exe");
     public static string C2BackupPath => Path.Combine(LocalRoot, "c2.bak");
-    public static string UninstallPath => Path.Combine(LocalRoot, "uninstall.bat");
     public static string DisabledFlagPath => Path.Combine(LocalRoot, "disabled.flag");
 
     public static string C2Root { get; } = Path.Combine(

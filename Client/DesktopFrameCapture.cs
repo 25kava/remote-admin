@@ -9,7 +9,7 @@ internal sealed class DesktopFrameCapture(Action<string>? log = null) : IDisposa
     public async Task<ScreenFrame> CaptureAsync(string id, long sequence, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!DesktopScreenSharing.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
+        if (!DesktopAccess.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
         if (compatible is not null) return await compatible.CaptureAsync(id, sequence, token);
         try
         {

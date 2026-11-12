@@ -6,7 +6,7 @@ public interface IRemoteInputSink
     void ReleaseAll();
 }
 
-// Input is leased to exactly one existing, visible screen subscription.
+// Input is leased to exactly one existing screen subscription.
 public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInputSink sink,
     Func<ControlState, CancellationToken, Task> sendState, Action<string> log,
     TimeSpan? heartbeatTimeout = null) : IAsyncDisposable
@@ -24,13 +24,13 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
             ObjectDisposedException.ThrowIf(disposed, this);
             if (current is not null) return;
             var access = screen.AccessFor(request.RequestId);
-            session = access is null ? null : new ControlSession(request.RequestId, access,
+            session = access is null ? null : new ControlSession(request.RequestId,
                 CancellationTokenSource.CreateLinkedTokenSource(token, access.Stopped));
             current = session;
             if (session is not null) monitor = MonitorAsync(session);
         }
         if (session is null)
-            await sendState(new(request.RequestId, "unavailable", "Start a visible screen session before enabling control."), token);
+            await sendState(new(request.RequestId, "unavailable", "Start a screen session before enabling control."), token);
     }
 
     public bool Apply(ControlInput request)
@@ -87,11 +87,10 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
         });
         try
         {
-            await session.Access.Indicator.SetControlActiveAsync(true);
             session.Token.ThrowIfCancellationRequested();
             lock (gate) session.Enabled = screen.AccessFor(session.Id) is not null;
             if (!session.Enabled) return;
-            await sendState(new(session.Id, "active", "Remote control active. Escape exits fullscreen; the red button stops sharing and control."), session.Token);
+            await sendState(new(session.Id, "active", "Remote control active. Escape exits fullscreen."), session.Token);
             while (!session.Token.IsCancellationRequested)
             {
                 lock (gate)
@@ -109,8 +108,6 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
                 session.Enabled = false;
                 if (ReferenceEquals(current, session)) ReleaseInputs();
             }
-            try { await session.Access.Indicator.SetControlActiveAsync(false); }
-            catch (Exception ex) { log($"Control indicator ended: {ex.Message}"); }
             try
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -141,10 +138,9 @@ public sealed class RemoteControlSession(ScreenShareSession screen, IRemoteInput
         await task;
     }
 
-    private sealed class ControlSession(string id, ScreenShareSession.ScreenAccess access, CancellationTokenSource stop)
+    private sealed class ControlSession(string id, CancellationTokenSource stop)
     {
         public string Id { get; } = id;
-        public ScreenShareSession.ScreenAccess Access { get; } = access;
         public CancellationTokenSource Stop { get; } = stop;
         public CancellationToken Token { get; } = stop.Token;
         public long LastHeartbeat = Environment.TickCount64;

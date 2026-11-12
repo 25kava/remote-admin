@@ -64,7 +64,7 @@ try {
     Copy-Item release\c1\c1.exe release-final\c1.exe -Force
     Copy-Item release\c2\c2.exe release-final\c2.exe -Force
     Copy-Item installer\install.bat release-final\install.bat -Force
-    Copy-Item installer\uninstall.bat release-final\uninstall.bat -Force
+    if (Test-Path release-final\uninstall.bat) { Remove-Item release-final\uninstall.bat -Force }
 
     Write-Host ''
     Write-Host 'Packaged:'

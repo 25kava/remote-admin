@@ -18,7 +18,7 @@ internal sealed class GdiFrameCapture : IDisposable
     public Task<ScreenFrame> CaptureAsync(string requestId, long sequence, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!DesktopScreenSharing.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
+        if (!DesktopAccess.IsInteractiveDesktop()) throw new InvalidOperationException("The desktop is locked or unavailable.");
         var bounds = Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("No primary display is available.");
         var scale = Math.Min(1d, Math.Min(1280d / bounds.Width, 720d / bounds.Height));
         var width = Math.Max(1, (int)Math.Round(bounds.Width * scale));

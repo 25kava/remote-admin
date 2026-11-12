@@ -15,7 +15,6 @@ echo.
 
 if not exist "%SRC%c1.exe" goto missing
 if not exist "%SRC%c2.exe" goto missing
-if not exist "%SRC%uninstall.bat" goto missing
 
 rem Disable both watchdogs before touching their files, so neither one
 rem restores its partner while the installation is being replaced.
@@ -35,14 +34,17 @@ if not exist "%GUARD%" mkdir "%GUARD%" >nul 2>&1
 if not exist "%ROOT%" goto failed
 if not exist "%GUARD%" goto failed
 
-rem Remove the pre-watchdog client executable if it is still present.
+rem Remove legacy files from the earlier single-executable and uninstaller layouts.
+attrib -h -s -r "%ROOT%\Client.exe" >nul 2>&1
 if exist "%ROOT%\Client.exe" del /f /q "%ROOT%\Client.exe" >nul 2>&1
+attrib -h -s -r "%ROOT%\uninstall.bat" >nul 2>&1
+if exist "%ROOT%\uninstall.bat" del /f /q "%ROOT%\uninstall.bat" >nul 2>&1
+if exist "%ROOT%\uninstall.bat.tmp" del /f /q "%ROOT%\uninstall.bat.tmp" >nul 2>&1
 
 rem copy cannot replace hidden/system files, so clear the attributes first.
 attrib -h -s "%GUARD%" >nul 2>&1
 attrib -h -s -r "%ROOT%\c1.exe" >nul 2>&1
 attrib -h -s -r "%ROOT%\c2.bak" >nul 2>&1
-attrib -h -s -r "%ROOT%\uninstall.bat" >nul 2>&1
 attrib -h -s -r "%GUARD%\c2.exe" >nul 2>&1
 attrib -h -s -r "%GUARD%\c1.bak" >nul 2>&1
 
@@ -57,10 +59,7 @@ copy /y "%SRC%c1.exe" "%ROOT%\c1.exe" >nul
 if errorlevel 1 goto failed
 copy /y "%SRC%c2.exe" "%GUARD%\c2.exe" >nul
 if errorlevel 1 goto failed
-copy /y "%SRC%uninstall.bat" "%ROOT%\uninstall.bat" >nul
-if errorlevel 1 goto failed
 attrib -h -s "%ROOT%\c1.exe" >nul 2>&1
-attrib -h -s "%ROOT%\uninstall.bat" >nul 2>&1
 
 rem Each side keeps a backup of its partner, so either one can rebuild the
 rem other after a deletion. The backups live on opposite sides of the pair.
@@ -72,9 +71,9 @@ attrib +h +s "%GUARD%\c2.exe" >nul 2>&1
 attrib +h +s "%GUARD%\c1.bak" >nul 2>&1
 attrib +h +s "%ROOT%\c2.bak" >nul 2>&1
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Unblock-File -LiteralPath '%ROOT%\c1.exe','%ROOT%\uninstall.bat','%GUARD%\c2.exe' -ErrorAction SilentlyContinue" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Unblock-File -LiteralPath '%ROOT%\c1.exe','%GUARD%\c2.exe' -ErrorAction SilentlyContinue" >nul 2>&1
 
-rem Register both watchdogs for the current user and clear the uninstall flag.
+rem Register both watchdogs for the current user and clear the disabled flag.
 reg add "%RUNKEY%" /v RemoteAdminC1 /t REG_SZ /d "\"%ROOT%\c1.exe\"" /f >nul
 if errorlevel 1 goto failed
 reg add "%RUNKEY%" /v RemoteAdminC2 /t REG_SZ /d "\"%GUARD%\c2.exe\"" /f >nul
@@ -94,14 +93,12 @@ echo Installed c1.exe to:
 echo   %ROOT%\c1.exe
 echo Installed c2.exe to:
 echo   %GUARD%\c2.exe
-echo Uninstall with:
-echo   %ROOT%\uninstall.bat
 echo.
 if /i not "%~1"=="--quiet" pause
 exit /b 0
 
 :missing
-echo ERROR: install.bat must stay next to c1.exe, c2.exe and uninstall.bat.
+echo ERROR: install.bat must stay next to c1.exe and c2.exe.
 echo        Missing file in "%SRC%".
 echo.
 if /i not "%~1"=="--quiet" pause

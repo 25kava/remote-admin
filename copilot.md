@@ -17,7 +17,7 @@ The payloads are self-contained .NET 10 `win-x64` single-file builds. Git LFS tr
 - `Admin` — ASP.NET Core/Kestrel server, UDP discovery responder, device registry, dashboard, and browser WebSocket relay.
 - `Client` — `c1.exe`, the hidden Windows-subsystem client with UDP discovery, WebSocket client, terminal handling, statistics collection and file-operation handlers.
 - `Watchdog` — `c2.exe`, a trimmed Windows-subsystem process with no networking and no admin features. It only restores or restarts `c1.exe`.
-- `installer` — `install.bat` and the visible `uninstall.bat`. `uninstall.bat` is embedded in `c1.exe` so it can be recreated if deleted.
+- `installer` — `install.bat`, the only installer.
 
 The solution file is `RemoteAdmin.slnx`.
 
@@ -50,7 +50,6 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Discovery runs continuously while connected. Each Admin reconnects independently; alternate interfaces are connection fallbacks. /31 and /32 adapters are excluded from broadcast calculation, UDP port-unreachable errors do not abandon the response window, and malformed replies are ignored.
 - WebSocket connection/greeting time out after ten seconds. Transport keepalive uses a ten-second interval and a ten-second Pong timeout. Session statistics tasks are cancelled and observed on disconnect.
 - Communication logging is serialized and cannot break connections when the log file is locked.
-- Recreates the embedded `uninstall.bat` next to itself if the visible script is deleted.
 
 `c2.exe`:
 
@@ -59,7 +58,7 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 - Uses the `RemoteAdmin.C2` mutex to prevent duplicate local instances.
 - Runs the C2 side of `GuardSupervisor`: it watches `c1.exe`, restores it from `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard\c1.bak`, restarts it when `RemoteAdmin.C1` is absent, and keeps both startup values present.
 - Is published with `PublishTrimmed=true` and is roughly one tenth the size of `c1.exe`.
-- Exits without restoring anything when the shared disabled flag or `HKCU\Software\RemoteAdminGuard\Disabled` is set by the installer or uninstaller.
+- Exits without restoring anything when the shared disabled flag or `HKCU\Software\RemoteAdminGuard\Disabled` is set by the installer.
 
 `Admin.exe`:
 
@@ -92,7 +91,7 @@ dotnet publish Watchdog\Watchdog.csproj -c Release -r win-x64 --self-contained t
 Copy-Item release\Admin\Admin.exe release-final\Admin.exe -Force
 Copy-Item release\c1\c1.exe release-final\c1.exe -Force
 Copy-Item release\c2\c2.exe release-final\c2.exe -Force
-Copy-Item installer\install.bat,installer\uninstall.bat release-final\ -Force
+Copy-Item installer\install.bat release-final\ -Force
 ```
 
 After changing any payload or installer script, commit the source and the updated `release-final` files. Git LFS must be installed before committing or pulling the binaries:
@@ -106,13 +105,13 @@ The plug-and-play requirement is intentional: `c1.exe` and `c2.exe` are self-con
 
 ## Watchdog layout and recovery
 
-- Visible side: `%LOCALAPPDATA%\RemoteAdmin\c1.exe`, `uninstall.bat` and the hidden/system `c2.bak`.
+- Visible side: `%LOCALAPPDATA%\RemoteAdmin\c1.exe` and the hidden/system `c2.bak`.
 - Hidden side: `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard\c2.exe` and the hidden/system `c1.bak`.
 - Each side keeps the other side's backup on its own side, so deleting one payload does not delete its recovery source.
 - Liveness is detected through the named mutexes `RemoteAdmin.C1` and `RemoteAdmin.C2`; no process enumeration or elevation is needed.
 - Every three seconds each supervisor: exits when disabled, ensures both directories and startup entries, repairs its partner's missing executable from the backup, refreshes its partner's backup, and starts a partner whose mutex is absent.
 - `install.bat` sets the disabled flag first, stops old `Client.exe`/`c1.exe`/`c2.exe` processes, clears hidden attributes, replaces both payloads and backups, writes both startup values, clears the flag and starts both processes. It also deletes the legacy `Client.exe`.
-- `uninstall.bat` sets the disabled flag, removes both startup values and the legacy one, stops both processes until none remain, deletes the payloads, backups, client state and hidden folder, removes `HKCU\Software\RemoteAdminGuard`, and schedules removal of its own folder and script. Admin logs in `%LOCALAPPDATA%\RemoteAdmin\Admin` are preserved.
+- `uninstall.bat` was removed. To uninstall manually, stop `c1.exe` and `c2.exe`, remove both startup values, then delete `%LOCALAPPDATA%\RemoteAdmin`, `%LOCALAPPDATA%\Microsoft\Windows\Caches\RemoteAdminGuard` and `HKCU\Software\RemoteAdminGuard`. The installer deletes a legacy `uninstall.bat` left by earlier builds.
 
 ## Current implemented functionality
 
@@ -143,7 +142,7 @@ Preserve the Admin + `c1.exe` + `c2.exe` payload model and the shared layout in 
 - Keep changes surgical and Windows-focused.
 - Prefer existing shared protocol records over duplicated JSON shapes.
 - Preserve the Admin + c1 + c2 payload model and keep the two watchdogs symmetrical.
-- Keep `install.bat` as the only installer and keep `uninstall.bat` embedded in `c1.exe`.
+- Keep `install.bat` as the only installer. Do not add an uninstaller script.
 - Do not commit credentials, local runtime state, `bin/`, `obj/`, or ordinary publish directories.
 - Update this file when architecture, protocol ports, executable behavior, or build procedures change.
 
@@ -153,18 +152,18 @@ Run `dotnet run --project tests/Communication.Tests -c Release` for isolated reg
 
 ## Live screen architecture
 
-- `Client/DesktopScreenSharing.cs` manages the primary interactive desktop indicator and shows a 40-DIP red circular Stop button at the top-right. The indicator remains on top, has a stop symbol, hover text and an accessible button name, and does not take focus when shown. Its taskbar entry also makes the stop control discoverable. It is displayed before any screen pixels are captured. It closes on session lock, logoff or disconnect.
-- `RemoteAdmin.Shared/ScreenShareSession.cs` owns each viewing session. There is no per-session consent dialog. A visible indicator lease is mandatory, checked before capture and before sending each frame. Local Stop, a hidden/minimized indicator, transport cancellation and capture failure end the session. Never add a path that captures without the visible local indicator.
+- `Client/DesktopAccess.cs` provides the interactive-desktop check used by capture and input. There is no target-side sharing window, indicator or stop button; screen sharing and remote control are silent on the target.
+- `RemoteAdmin.Shared/ScreenShareSession.cs` owns each viewing session. There is no per-session consent dialog and no visible target UI. The Admin viewer owns the lifetime. Stopping the viewer, replacing the screen request, transport cancellation and capture failure end the session. Do not add a target-side indicator or stop button.
 - Frames use JPEG, quality 65, max 1280x720, max 30 fps, with each send awaited to prevent a backlog. Secure/locked desktops are unavailable. Capture is primary-display only; the Windows cursor is included at the matching scale. Audio is not implemented.
 - `screenStart`, `screenStop`, `screenState` and `screenFrame` use shared records. DeviceHub generates the browser's request ID, rewrites start/stop requests and sends screen messages only to that subscribed browser. Viewer closure sends a matching stop; no stream automatically resumes after reconnecting.
 - ClientHello and DeviceSnapshot include an optional screen capability flag; old clients default to unsupported. Updating `Admin.exe` and `c1.exe` is necessary for screen viewing. Existing non-screen protocol remains compatible.
-- `c1.exe` targets `net10.0-windows10.0.19041.0` with `UseWindowsForms=true`. All three payloads remain self-contained win-x64 single files. Admin embeds both dashboard HTML and `screen.js`.
-- Communication tests include screen session lifecycle, unavailable/hidden indicator, stop ownership, browser isolation and old-client handling. Native stop-indicator and desktop JPEG capture were also checked with a local test harness; no screen frames were sent to remote computers in that test.
+- `c1.exe` targets `net10.0-windows10.0.19041.0`. All three payloads remain self-contained win-x64 single files. Admin embeds both dashboard HTML and `screen.js`.
+- Communication tests include screen session lifecycle, cancellation, viewer isolation, pacing/backpressure and old-client handling. Desktop JPEG capture was also checked with a local test harness; no screen frames were sent to remote computers in that test.
 
 ## Fullscreen remote control
 
 - GPU capture includes the OS cursor. The compatibility path uses `Client/DesktopCursor.cs` to read GetCursorInfo, copy the cursor, apply its scaled hotspot and draw it into the resized desktop. Owned icon/bitmap handles are released on every frame. Hidden cursors and cursors outside the primary display are omitted.
-- `RemoteAdmin.Shared/RemoteControlSession.cs` leases input only to the current visible screen request. It sets the local control indicator, serializes input and releases held input on stop, revoked/hidden screen, transport cancellation or missing heartbeats (2.5 seconds; browser sends every 500 ms). There is no target approval prompt for this unattended mode. Do not add a path that injects without the live visible screen lease.
+- `RemoteAdmin.Shared/RemoteControlSession.cs` leases input only to the current screen request. It serializes input and releases held input on stop, revoked screen, transport cancellation or missing heartbeats (2.5 seconds; browser sends every 500 ms). There is no target approval prompt and no target-side control indicator. Do not add a path that injects without the live screen lease.
 - `Client/WindowsInputSink.cs` uses SendInput with normalized virtual-desktop mouse coordinates and physical keyboard scan codes, tracks only remotely held keys/buttons and releases those on teardown. It checks the interactive desktop and does not elevate or bypass UIPI/UAC. It does not log typed keys or block local input. Tests replace SendInput with an injected fake.
 - `controlStart`, `controlStop`, `controlInput`, `controlHeartbeat`, `controlState` and the optional RemoteControlSupported capability use shared records. DeviceHub forces the browser's own request ID and requires an existing subscription/fullscreen declaration before forwarding input. Fullscreen enforcement in the browser is a UI/lifecycle condition, not authentication; the prototype's existing trust model is unchanged.
 - Browser control works only in the fullscreen viewport. Its toolbar enables/stops control and exits fullscreen. Escape explicitly stops/exits; blur, hidden tabs, pagehide and fullscreenchange release control. The backend watchdog handles lost stop packets. Cleanup tracks started sessions until stop messages are sent so page reload cancellation cannot strand a screen lease.
@@ -174,4 +173,4 @@ Run `dotnet run --project tests/Communication.Tests -c Release` for isolated reg
 
 ## 30 FPS capture
 
-The target is `Protocol.ScreenFramesPerSecond = 30`. ScreenShareSession uses a PeriodicTimer so coarse Windows timer jitter does not accumulate; capture/send remain sequential and missed ticks coalesce. SharingLifetime cancels active capture before disposing its visible indicator, including failure paths. `GpuFrameCapture` uses Windows Graphics Capture/D3D11 with cursor and OS border enabled, at most one latest native frame and one encoded image, and cancels per viewing token. Do not disable the OS capture border or fall back after permission errors. `GdiFrameCapture` reuses a pre-scaled 32-bit DIB, encoder settings and stream for hardware/API compatibility; cursor scaling preserves hotspots. `DesktopFrameCapture` selects the supported path and releases per-view GPU resources. Dashboard FPS is measured from incoming frames rather than a fixed label. Windows SDK/WinRT assemblies are bundled in the same single c1.exe.
+The target is `Protocol.ScreenFramesPerSecond = 30`. ScreenShareSession uses a PeriodicTimer so coarse Windows timer jitter does not accumulate; capture/send remain sequential and missed ticks coalesce. SharingLifetime cancels active capture when the session ends, including failure paths. `GpuFrameCapture` uses Windows Graphics Capture/D3D11 with cursor and OS border enabled, at most one latest native frame and one encoded image, and cancels per viewing token. Do not disable the OS capture border or fall back after permission errors. `GdiFrameCapture` reuses a pre-scaled 32-bit DIB, encoder settings and stream for hardware/API compatibility; cursor scaling preserves hotspots. `DesktopFrameCapture` selects the supported path and releases per-view GPU resources. Dashboard FPS is measured from incoming frames rather than a fixed label. Windows SDK/WinRT assemblies are bundled in the same single c1.exe.
