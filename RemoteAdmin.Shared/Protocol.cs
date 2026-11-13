@@ -10,13 +10,22 @@ public static class Protocol
     public const string DiscoveryRequest = "REMOTE_ADMIN_DISCOVER_V1";
     public const string Product = "RemoteAdmin";
     public const int ScreenFramesPerSecond = 30;
+    // Version 2 adds the Admin login gate. Clients that advertise this version
+    // only connect to an Admin that reports the same version and a signed-in panel.
+    // Older peers omit the field and are treated as version 0.
+    public const int CurrentProtocolVersion = 2;
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 }
 
-public sealed record DiscoveryAnnouncement(string Host, int Port, string InstanceId);
+public sealed record DiscoveryAnnouncement(string Host, int Port, string InstanceId,
+    int ProtocolVersion = 0, bool Authenticated = false)
+{
+    [JsonIgnore]
+    public bool IsEligibleForCurrentClient => ProtocolVersion >= Protocol.CurrentProtocolVersion && Authenticated;
+}
 
 public sealed record ClientHello(
     string Type,
@@ -25,9 +34,10 @@ public sealed record ClientHello(
     string UserName,
     string IpAddress,
     bool ScreenStreamingSupported = false,
-    bool RemoteControlSupported = false);
+    bool RemoteControlSupported = false,
+    int ProtocolVersion = 0);
 
-public sealed record ServerHello(string Type, string? Message);
+public sealed record ServerHello(string Type, string? Message, int ProtocolVersion = 0, bool Authenticated = false);
 public sealed record ClientNotes(string Text);
 
 public sealed record DeviceSnapshot(

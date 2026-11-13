@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using RemoteAdmin;
 using RemoteAdmin.Shared;
 
 var results = new List<string>();
@@ -80,6 +81,30 @@ await Test("logging tolerates concurrent writers and an exclusively locked file"
     logger.Write("A sharing violation must not escape into the connection loop");
 });
 
+await Test("Admin credentials and discovery eligibility separate updated, locked and legacy Admins", () =>
+{
+    var localAuth = new AdminAuth(Log);
+    Assert(localAuth.SignIn("admin", "wrong") is null, "Wrong password was accepted");
+    Assert(localAuth.SignIn("root", "1234") is null, "Wrong username was accepted");
+    Assert(!localAuth.IsAnySignedIn, "A failed sign-in created a session");
+    var token = localAuth.SignIn("admin", "1234");
+    Assert(token is not null && localAuth.IsSignedIn(token), "The configured credentials were rejected");
+    Assert(localAuth.IsAnySignedIn, "A signed-in dashboard was not reported");
+    localAuth.SignOut(token!);
+    Assert(!localAuth.IsAnySignedIn, "Signing out did not clear the dashboard state");
+
+    var updated = new DiscoveryAnnouncement("127.0.0.1", 1, "updated", Protocol.CurrentProtocolVersion, true);
+    var locked = updated with { Authenticated = false };
+    var legacy = new DiscoveryAnnouncement("127.0.0.1", 1, "legacy");
+    Assert(updated.IsEligibleForCurrentClient, "A signed-in updated Admin was rejected");
+    Assert(!locked.IsEligibleForCurrentClient, "A signed-out updated Admin was accepted");
+    Assert(!legacy.IsEligibleForCurrentClient, "A legacy Admin was accepted by the updated client");
+    var oldWire = JsonSerializer.Deserialize<DiscoveryAnnouncement>(
+        "{\"host\":\"127.0.0.1\",\"port\":1,\"instanceId\":\"old\"}", Protocol.Json);
+    Assert(oldWire is not null && !oldWire.IsEligibleForCurrentClient, "Legacy discovery JSON was accepted");
+    return Task.CompletedTask;
+});
+
 await Test("discovery and independent reconnect continue while another Admin remains connected", async () =>
 {
     using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -112,7 +137,9 @@ builder.Logging.ClearProviders();
 builder.WebHost.UseUrls("http://127.0.0.1:0");
 await using var app = builder.Build();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(10), KeepAliveTimeout = TimeSpan.FromSeconds(10) });
-new DeviceHub(Log).MapEndpoints(app);
+var auth = new AdminAuth(Log);
+var hub = new DeviceHub(Log, auth);
+hub.MapEndpoints(app);
 await app.StartAsync();
 var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
 var portNumber = new Uri(address).Port;
@@ -190,6 +217,93 @@ await Test("parallel registration and removal do not delete unrelated clients", 
     }
     finally { foreach (var peer in peers) await peer.DisposeAsync(); }
     await Until(async () => (await Devices())!.Length == 0, "Parallel test leaked a device");
+});
+
+await Test("updated clients require a signed-in Admin while legacy clients stay compatible", async () =>
+{
+    auth.SignOut(auth.SignIn("admin", "1234"));
+    Assert(!auth.IsAnySignedIn, "Test started with a signed-in Admin");
+    await using var legacy = new ProbeClient(portNumber, "legacy-auth", "legacy-auth", Log);
+    await legacy.Ready;
+    Assert((await Devices()) is [{ DeviceId: "legacy-auth" }], "Legacy client was not accepted without a dashboard login");
+
+    var refused = false;
+    using (var limit = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+    {
+        try
+        {
+            await ClientTransport.RunAsync(new("127.0.0.1", portNumber, "locked"), new("clientHello",
+                    "modern-locked", "modern-locked", "test", "127.0.0.1", false, false, Protocol.CurrentProtocolVersion),
+                (_, _, _) => throw new Exception("A signed-out Admin opened a modern client session."), Log, limit.Token);
+        }
+        catch (InvalidDataException) { refused = true; }
+    }
+    Assert(refused, "Updated client was accepted while the dashboard was signed out");
+    Assert((await Devices()) is [{ DeviceId: "legacy-auth" }], "Rejected updated client appeared in the device list");
+
+    var token = auth.SignIn("admin", "1234");
+    Assert(token is not null, "Test could not sign in the Admin");
+    await using var modern = new ProbeClient(portNumber, "modern-auth", "modern-auth", Log,
+        protocolVersion: Protocol.CurrentProtocolVersion);
+    await modern.Ready;
+    await Until(async () => (await Devices())!.Length == 2, "Updated client was not accepted after login");
+
+    auth.SignOut(token!);
+    hub.DisconnectSignedInClients();
+    await Until(async () => (await Devices()) is [{ DeviceId: "legacy-auth" }],
+        "Signing out did not remove the updated client");
+    await modern.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert(!legacy.Completion.IsCompleted, "Signing out removed a legacy client");
+});
+
+await Test("dashboard login protects the UI, API and browser relay sockets", async () =>
+{
+    var gatedAuth = new AdminAuth(Log);
+    var gatedHub = new DeviceHub(Log, gatedAuth);
+    var gatedBuilder = WebApplication.CreateBuilder();
+    gatedBuilder.Logging.ClearProviders();
+    gatedBuilder.WebHost.UseUrls("http://127.0.0.1:0");
+    await using var gatedApp = gatedBuilder.Build();
+    gatedApp.UseWebSockets();
+    AdminWeb.UseAuthentication(gatedApp, gatedAuth);
+    AdminWeb.MapAssets(gatedApp);
+    AdminWeb.MapAuthentication(gatedApp, gatedAuth, gatedHub);
+    gatedHub.MapEndpoints(gatedApp);
+    await gatedApp.StartAsync();
+    var gatedAddress = gatedApp.Services.GetRequiredService<IServer>().Features
+        .Get<IServerAddressesFeature>()!.Addresses.Single();
+    var gatedPort = new Uri(gatedAddress).Port;
+    var cookies = new CookieContainer();
+    using var gatedHttp = new HttpClient(new HttpClientHandler { CookieContainer = cookies, UseCookies = true })
+    { BaseAddress = new Uri(gatedAddress), Timeout = TimeSpan.FromSeconds(5) };
+
+    var loginPage = await gatedHttp.GetAsync("/");
+    Assert(loginPage.IsSuccessStatusCode &&
+        (await loginPage.Content.ReadAsStringAsync()).Contains("Sign in"), "Login page was not served");
+    Assert((await gatedHttp.GetAsync("/api/devices")).StatusCode == HttpStatusCode.Unauthorized,
+        "Devices API was exposed without a login");
+
+    using (var browser = new ClientWebSocket())
+    {
+        var refused = false;
+        try { await browser.ConnectAsync(new Uri($"ws://127.0.0.1:{gatedPort}/ws/none"), CancellationToken.None); }
+        catch (WebSocketException) { refused = true; }
+        Assert(refused, "Browser relay socket was accepted without a login");
+    }
+
+    var wrong = await gatedHttp.PostAsJsonAsync("/api/login", new { username = "admin", password = "nope" });
+    Assert(wrong.StatusCode == HttpStatusCode.Unauthorized, "Wrong password was accepted");
+    var good = await gatedHttp.PostAsJsonAsync("/api/login", new { username = "admin", password = "1234" });
+    Assert(good.IsSuccessStatusCode, "Configured credentials were rejected by the login endpoint");
+    Assert((await gatedHttp.GetAsync("/api/devices")).IsSuccessStatusCode, "Signed-in API access failed");
+    var dashboard = await gatedHttp.GetStringAsync("/");
+    Assert(dashboard.Contains("Remote Admin") && dashboard.Contains("Sign out"), "Dashboard was not served after login");
+
+    var logout = await gatedHttp.PostAsync("/api/logout", null);
+    Assert(logout.IsSuccessStatusCode, "Sign-out request failed");
+    Assert((await gatedHttp.GetAsync("/api/devices")).StatusCode == HttpStatusCode.Unauthorized,
+        "Session survived sign-out");
+    await gatedApp.StopAsync();
 });
 
 await Test("an unreachable interface falls back to another endpoint of the same Admin", async () =>
@@ -342,14 +456,16 @@ sealed class ProbeClient : IAsyncDisposable
     public Task Completion { get; }
     public Channel<string> Messages { get; } = Channel.CreateUnbounded<string>();
     public static SystemStats Stats => new(5, 25, 100, 200, "communication test", "127.0.0.1", null, 60);
-    public ProbeClient(int port, string id, string name, Action<string> log, bool screenSupported = false, bool controlSupported = false)
+    public ProbeClient(int port, string id, string name, Action<string> log,
+        bool screenSupported = false, bool controlSupported = false, int protocolVersion = 0)
     {
         Completion = Run();
         async Task Run()
         {
             try
             {
-                await ClientTransport.RunAsync(new("127.0.0.1", port, "test"), new("clientHello", id, name, "test", "127.0.0.1", screenSupported, controlSupported),
+                await ClientTransport.RunAsync(new("127.0.0.1", port, "test"), new("clientHello", id, name, "test",
+                        "127.0.0.1", screenSupported, controlSupported, protocolVersion),
                     async (ws, sendGate, token) =>
                     {
                         socket = ws;

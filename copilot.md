@@ -12,9 +12,9 @@ The payloads are self-contained .NET 10 `win-x64` single-file builds. Git LFS tr
 
 ## Projects
 
-- `RemoteAdmin.Shared` — shared protocol records and JSON serializer settings.
+- `RemoteAdmin.Shared` — shared protocol records, protocol versioning and JSON serializer settings.
 - `RemoteAdmin.Guard` — shared installation paths, single-instance mutexes and the two-way watchdog supervisor used by both client payloads.
-- `Admin` — ASP.NET Core/Kestrel server, UDP discovery responder, device registry, dashboard, and browser WebSocket relay.
+- `Admin` — ASP.NET Core/Kestrel server, UDP discovery responder, login/session gate, device registry, dashboard, and browser WebSocket relay.
 - `Client` — `c1.exe`, the hidden Windows-subsystem client with UDP discovery, WebSocket client, terminal handling, statistics collection and file-operation handlers.
 - `Watchdog` — `c2.exe`, a trimmed Windows-subsystem process with no networking and no admin features. It only restores or restarts `c1.exe`.
 - `installer` — `install.bat` (the only installer) and `uninstall.bat` (removal only).
@@ -28,7 +28,8 @@ The solution file is `RemoteAdmin.slnx`.
 - Client WebSocket port: `38992`
 - Admin dashboard: `http://127.0.0.1:38990`
 - Client discovery is broadcast-based and does not use hardcoded Admin IP addresses.
-- Authentication, pairing, shared secrets, and trust verification were intentionally removed for this prototype. Any reachable LAN client can connect. Discovery uses interface-specific IPv4 broadcasts plus the universal broadcast.
+- The dashboard requires a login. The prototype credentials are hardcoded as `admin` / `1234`; sessions are in-memory, slide for 30 minutes of inactivity, and disappear when Admin restarts. The login page is served for unauthenticated `/` and `/login`; every other dashboard asset, API route and browser WebSocket route requires the session cookie. `/client` remains reachable so clients can connect.
+- `CurrentProtocolVersion = 2` adds the login gate. Discovery announcements and the server greeting carry `protocolVersion` and `authenticated`; a client advertising version 2 only connects when both say the Admin is updated and signed in. Signing out (or expiring the last session) disconnects version-2 clients. Legacy clients omit the version (treated as 0) and remain fully compatible; a new Admin accepts and controls them in every state.
 
 The Admin responds to discovery with its LAN address, WebSocket port, and instance ID. Each client connects to every discovered Admin instance and reconnects after failures. The Admin only keeps active connections in memory; disconnected devices are not retained. Each client stores notes in `%LOCALAPPDATA%\RemoteAdmin\system-notes.txt`.
 
@@ -63,6 +64,8 @@ The Admin responds to discovery with its LAN address, WebSocket port, and instan
 `Admin.exe`:
 
 - Opens the localhost dashboard automatically.
+- Requires the hardcoded `admin` / `1234` login before serving the dashboard, devices API or browser relay. `/login` serves the embedded login page; sessions use an HttpOnly, SameSite=Strict cookie with a 30-minute sliding expiry and are pruned every 30 seconds.
+- Reports protocol version 2 and its signed-in state on discovery, refuses updated clients in the handshake while signed out, and disconnects those clients when the last session signs out or expires. Legacy clients are always accepted so old payloads remain visible and controllable.
 - Accepts client WebSocket connections and maintains device status.
 - Ensures inbound LAN firewall rules for UDP 38991 and TCP 38992 on first run, requesting UAC approval when needed.
 - Serves a dark dashboard with device list and terminal/session controls.
@@ -117,6 +120,8 @@ The plug-and-play requirement is intentional: `c1.exe` and `c2.exe` are self-con
 ## Current implemented functionality
 
 - LAN Admin discovery and reconnect.
+- Admin dashboard login with a hardcoded prototype account, session cookies and sign-out.
+- Updated clients only appear while an updated Admin dashboard is signed in; legacy clients remain compatible.
 - Active device list, names, status, and IP address.
 - Client-hosted system notes editable from the Admin dashboard.
 - Localhost dashboard.
@@ -145,12 +150,13 @@ Preserve the Admin + `c1.exe` + `c2.exe` payload model and the shared layout in 
 - Prefer existing shared protocol records over duplicated JSON shapes.
 - Preserve the Admin + c1 + c2 payload model and keep the two watchdogs symmetrical.
 - Keep `install.bat` as the only installer. `uninstall.bat` may only remove; it must never install, repair or restore anything.
-- Do not commit credentials, local runtime state, `bin/`, `obj/`, or ordinary publish directories.
+- Do not commit local runtime state, `bin/`, `obj/`, or ordinary publish directories.
+- Do not commit credentials or secrets other than the explicit prototype `admin` / `1234` login placeholder. Replace that placeholder before any real deployment.
 - Update this file when architecture, protocol ports, executable behavior, or build procedures change.
 
 ## Communication tests
 
-Run `dotnet run --project tests/Communication.Tests -c Release` for isolated regression tests of discovery, independent reconnects, fallback addresses, cancellation, logging, concurrent device registration, browser disconnect isolation and silent network failures. Add `-- --live --soak` to discover an existing LAN Admin and maintain a temporary inert test client for 75 seconds. Tests do not start terminals or alter startup registration and are not part of the distributed payload set.
+Run `dotnet run --project tests/Communication.Tests -c Release` for isolated regression tests of discovery, dashboard login, updated-client gating, legacy-client compatibility, independent reconnects, fallback addresses, cancellation, logging, concurrent device registration, browser disconnect isolation and silent network failures. Add `-- --live --soak` to discover an existing LAN Admin and maintain a temporary inert test client for 75 seconds. The live probe intentionally uses the legacy handshake so it works against old and new Admins. Tests do not start terminals or alter startup registration and are not part of the distributed payload set.
 
 ## Live screen architecture
 
@@ -159,7 +165,7 @@ Run `dotnet run --project tests/Communication.Tests -c Release` for isolated reg
 - Frames use JPEG, quality 65, max 1280x720, max 30 fps, with each send awaited to prevent a backlog. Secure/locked desktops are unavailable. Capture is primary-display only; the Windows cursor is included at the matching scale. Audio is not implemented.
 - `screenStart`, `screenStop`, `screenState` and `screenFrame` use shared records. DeviceHub generates the browser's request ID, rewrites start/stop requests and sends screen messages only to that subscribed browser. Viewer closure sends a matching stop; no stream automatically resumes after reconnecting.
 - ClientHello and DeviceSnapshot include an optional screen capability flag; old clients default to unsupported. Updating `Admin.exe` and `c1.exe` is necessary for screen viewing. Existing non-screen protocol remains compatible.
-- `c1.exe` targets `net10.0-windows10.0.22000.0`. All three payloads remain self-contained win-x64 single files. Admin embeds both dashboard HTML and `screen.js`.
+- `c1.exe` targets `net10.0-windows10.0.22000.0`. All three payloads remain self-contained win-x64 single files. Admin embeds the login page, dashboard HTML and `screen.js`.
 - Communication tests include screen session lifecycle, cancellation, viewer isolation, pacing/backpressure and old-client handling. Desktop JPEG capture was also checked with a local test harness; no screen frames were sent to remote computers in that test.
 
 ## Fullscreen remote control

@@ -30,7 +30,9 @@ Copy-Item installer\install.bat release-final\ -Force
 
 The repository tracks the final executables with Git LFS, so cloning or pulling the repository materializes `release-final\Admin.exe`, `release-final\c1.exe` and `release-final\c2.exe`. Git LFS must be installed and enabled on the machine performing the clone.
 
-This prototype intentionally has no login, pairing, trust verification, or client authentication. Any client that can reach the Admin LAN port can connect. Discovery sends to both interface-specific IPv4 broadcasts and the universal broadcast to work across more LAN configurations.
+This prototype requires a login before the Admin dashboard, API or browser relay can be used. The credentials are currently hardcoded as `admin` / `1234`; replace them before any real deployment. Login sessions are held in memory, expire after 30 minutes of inactivity, and every browser is signed out when `Admin.exe` restarts.
+
+Updated clients only publish themselves to an updated Admin whose dashboard is currently signed in. The discovery reply carries the Admin protocol version and signed-in state, and the WebSocket greeting enforces the same rule: an updated client rejects an old Admin (`protocolVersion` below 2) and a signed-out Admin, while the Admin refuses updated clients until somebody signs in. Signing out or letting the last session expire disconnects updated clients so they disappear from the device list. Legacy clients (protocol version 0) are still accepted in every state and remain fully visible and controllable, so a new Admin works with both updated and old clients. Discovery sends to both interface-specific IPv4 broadcasts and the universal broadcast to work across more LAN configurations.
 
 The Admin only lists currently connected clients; disconnected clients are not retained. Each client stores its system notes in `%LOCALAPPDATA%\RemoteAdmin\system-notes.txt`, and the Admin dashboard can read and update those notes.
 
@@ -68,7 +70,7 @@ WebSocket connection and greeting have a ten-second timeout. Both updated peers 
 
 Admin firewall checks verify the executable path as well as the rule name, so moving Admin.exe cannot silently reuse a rule for an older path. Ports and protocol records remain unchanged; updated programs interoperate with the previous release.
 
-Communication regression tests run without starting a remote shell or changing startup registration:
+Communication regression tests cover discovery, dashboard login and session gating, updated-client rejection while signed out, legacy-client compatibility, independent reconnects and the existing media/control paths. They run without starting a remote shell or changing startup registration:
 
 ```powershell
 dotnet run --project tests/Communication.Tests -c Release
@@ -88,7 +90,7 @@ Update `Admin.exe` and `c1.exe` to use the live screen panel. Select a connected
 
 Screen sharing is silent on the target computer: there is no on-screen indicator, stop button or other local UI. Stop sharing from the Admin viewer, close the viewer, change devices or lose the connection. A locked or unavailable desktop also ends sharing. A new viewing request is required to restart it.
 
-Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update `c1.exe` before screen viewing is available. The dashboard and its screen-view script are embedded in Admin.exe; no extra runtime files are required.
+Only the requesting browser receives the images. One viewer can share a client's screen at a time, including across multiple Admin connections. Older clients are listed normally, with a message to update `c1.exe` before screen viewing is available. The login page, dashboard and screen-view script are embedded in Admin.exe; no extra runtime files are required.
 
 `c1.exe` targets `net10.0-windows` with Windows desktop capture. The published payloads remain self-contained single-file Windows x64 programs. Screen-session tests use synthetic pixels and validate viewer isolation, cancellation, pacing and backpressure without starting a terminal or changing startup registration.
 

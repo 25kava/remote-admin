@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using RemoteAdmin;
 using RemoteAdmin.Shared;
 
 var dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemoteAdmin", "Admin");
@@ -19,18 +20,20 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://127.0.0.1:38990", "http://0.0.0.0:" + Protocol.ClientPort);
 builder.WebHost.UseKestrel();
 var app = builder.Build();
+var auth = new AdminAuth(Log);
+var hub = new DeviceHub(Log, auth);
 app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(10),
     KeepAliveTimeout = TimeSpan.FromSeconds(10)
 });
-app.UseDefaultFiles();
-app.UseStaticFiles();
-app.MapGet("/", () => Results.Content(ReadAsset("index.html"), "text/html"));
-app.MapGet("/screen.js", () => Results.Content(ReadAsset("screen.js"), "text/javascript"));
+AdminWeb.UseAuthentication(app, auth);
+AdminWeb.MapAssets(app);
+AdminWeb.MapAuthentication(app, auth, hub);
+hub.MapEndpoints(app);
 
 var discoveryTask = Task.Run(() => DiscoveryLoop(app.Lifetime.ApplicationStopping));
-new DeviceHub(Log).MapEndpoints(app);
+var sessionPruneTask = Task.Run(() => SessionPruneLoop(app.Lifetime.ApplicationStopping));
 
 Console.WriteLine("Admin dashboard: http://127.0.0.1:38990");
 _ = Process.Start(new ProcessStartInfo("http://127.0.0.1:38990") { UseShellExecute = true });
@@ -39,6 +42,7 @@ await app.RunAsync();
 async Task DiscoveryLoop(CancellationToken stop)
 {
     using var udp = new UdpClient(Protocol.DiscoveryPort) { EnableBroadcast = true };
+    var wasSignedIn = auth.IsAnySignedIn;
     while (!stop.IsCancellationRequested)
     {
         try
@@ -46,8 +50,16 @@ async Task DiscoveryLoop(CancellationToken stop)
             var received = await udp.ReceiveAsync(stop);
             if (Encoding.UTF8.GetString(received.Buffer) == Protocol.DiscoveryRequest)
             {
-                Log($"Discovery request from {received.RemoteEndPoint.Address}.");
-                var response = JsonSerializer.SerializeToUtf8Bytes(new DiscoveryAnnouncement(GetLocalIp(), Protocol.ClientPort, instanceId), Protocol.Json);
+                var signedIn = auth.IsAnySignedIn;
+                if (wasSignedIn && !signedIn)
+                {
+                    Log("Admin dashboard is no longer signed in; disconnecting updated clients.");
+                    hub.DisconnectSignedInClients();
+                }
+                wasSignedIn = signedIn;
+                Log($"Discovery request from {received.RemoteEndPoint.Address} (signed in: {signedIn}).");
+                var response = JsonSerializer.SerializeToUtf8Bytes(new DiscoveryAnnouncement(
+                    GetLocalIp(), Protocol.ClientPort, instanceId, Protocol.CurrentProtocolVersion, signedIn), Protocol.Json);
                 await udp.SendAsync(response, response.Length, received.RemoteEndPoint);
             }
         }
@@ -61,12 +73,18 @@ async Task DiscoveryLoop(CancellationToken stop)
     }
 }
 
-static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
-static string ReadAsset(string fileName)
+async Task SessionPruneLoop(CancellationToken stop)
 {
-    var resource = typeof(Program).Assembly.GetManifestResourceNames().FirstOrDefault(x => x.EndsWith("wwwroot." + fileName, StringComparison.OrdinalIgnoreCase));
-    if (resource is null) return "<h1>Dashboard resource missing</h1>";
-    using var stream = typeof(Program).Assembly.GetManifestResourceStream(resource);
-    using var reader = new StreamReader(stream!);
-    return reader.ReadToEnd();
+    while (!stop.IsCancellationRequested)
+    {
+        try
+        {
+            if (auth.PruneExpired()) hub.DisconnectSignedInClients();
+            await Task.Delay(TimeSpan.FromSeconds(30), stop);
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+        catch (Exception ex) { Log($"Session cleanup error: {ex.Message}"); }
+    }
 }
+
+static string GetLocalIp() => Dns.GetHostEntry(Dns.GetHostName()).AddressList.FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";

@@ -25,14 +25,30 @@ var stopping = new CancellationTokenSource();
 await using var guard = new GuardSupervisor(GuardRole.C1, ClientLog.Write, stopping);
 guard.Start();
 await ConnectionSupervisor.RunAsync(
-    token => LanDiscovery.FindAsync(ClientLog.Write, token),
+    DiscoverAsync,
     (server, token) => Connect(server, deviceId, notesPath, token),
     ClientLog.Write, stopping.Token);
+
+static async Task<List<DiscoveryAnnouncement>> DiscoverAsync(CancellationToken token)
+{
+    var found = await LanDiscovery.FindAsync(ClientLog.Write, token);
+    var eligible = new List<DiscoveryAnnouncement>();
+    foreach (var server in found)
+    {
+        if (server.IsEligibleForCurrentClient) { eligible.Add(server); continue; }
+        var reason = server.ProtocolVersion < Protocol.CurrentProtocolVersion
+            ? $"outdated Admin protocol {server.ProtocolVersion}"
+            : "Admin dashboard is not signed in";
+        ClientLog.Write($"Ignoring Admin {server.InstanceId} at {server.Host}:{server.Port}: {reason}.");
+    }
+    return eligible;
+}
 
 static Task Connect(DiscoveryAnnouncement server, string deviceId, string notesPath, CancellationToken token)
 {
     var canControl = !LanDiscovery.IsLocalAddress(server.Host);
-    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp(), true, canControl);
+    var hello = new ClientHello("clientHello", deviceId, Environment.MachineName, Environment.UserName, GetLocalIp(),
+        true, canControl, Protocol.CurrentProtocolVersion);
     return ClientTransport.RunAsync(server, hello,
         (socket, gate, sessionToken) => RunSession(socket, gate, notesPath, canControl, sessionToken), ClientLog.Write, token);
 }

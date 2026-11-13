@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Remote Admin</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 0,#1f2937 0,#0b1220 55%,#020617 100%);color:#e5e7eb;font:14px Segoe UI,sans-serif;padding:24px}
+  .card{width:min(380px,100%);background:#111827;border:1px solid #374151;border-radius:12px;padding:32px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+  .brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .mark{width:34px;height:34px;border-radius:8px;background:linear-gradient(145deg,#2563eb,#1d4ed8);display:grid;place-items:center;font-weight:700;color:#fff}
+  h1{font-size:20px;margin:0;letter-spacing:.2px}
+  p.sub{margin:6px 0 24px;color:#9ca3af;line-height:1.45}
+  label{display:block;font-weight:600;margin:0 0 6px;color:#d1d5db}
+  .field{margin-bottom:16px}
+  input{width:100%;background:#0b1220;color:#e5e7eb;border:1px solid #4b5563;border-radius:7px;padding:11px 12px;font:inherit;outline:none}
+  input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.22)}
+  button{width:100%;margin-top:6px;background:#2563eb;color:#fff;border:0;border-radius:7px;padding:12px;font:600 15px Segoe UI,sans-serif;cursor:pointer}
+  button:hover{background:#1d4ed8}
+  button:disabled{opacity:.6;cursor:progress}
+  .error{display:none;margin:0 0 16px;padding:10px 12px;border-radius:7px;background:#451a1a;border:1px solid #7f1d1d;color:#fecaca}
+  .error.shown{display:block}
+  .foot{margin-top:22px;padding-top:16px;border-top:1px solid #1f2937;color:#6b7280;font-size:12px;line-height:1.5}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="brand"><span class="mark">RA</span><h1>Remote Admin</h1></div>
+  <p class="sub">Sign in to manage connected computers. Updated clients only appear while this dashboard is signed in.</p>
+  <div id="error" class="error" role="alert"></div>
+  <form id="form" autocomplete="on">
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button id="submit" type="submit">Sign in</button>
+  </form>
+  <p class="foot">Prototype access control. One Admin session unlocks the dashboard and accepts updated clients on this LAN.</p>
+</main>
+<script>
+const form=document.getElementById('form'),error=document.getElementById('error'),submit=document.getElementById('submit');
+function show(message){error.textContent=message;error.classList.add('shown')}
+form.addEventListener('submit',async event=>{
+  event.preventDefault();
+  error.classList.remove('shown');
+  submit.disabled=true;submit.textContent='Signing in…';
+  try{
+    const response=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username.value,password:password.value})});
+    if(response.ok){location.replace('/');return}
+    const body=await response.json().catch(()=>({}));
+    show(body.error||'Sign-in failed.');
+  }catch{
+    show('Cannot reach the Admin service.');
+  }finally{
+    submit.disabled=false;submit.textContent='Sign in';
+  }
+});
+</script>
+</body>
+</html>

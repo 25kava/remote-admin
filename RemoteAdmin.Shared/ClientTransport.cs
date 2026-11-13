@@ -30,8 +30,16 @@ public static class ClientTransport
                     throw new InvalidDataException("Invalid Admin handshake.");
                 response.Write(buffer, 0, frame.Count);
             } while (!frame.EndOfMessage);
-            if (JsonSerializer.Deserialize<ServerHello>(response.ToArray(), Protocol.Json)?.Type != "serverHello")
+            var greeting = JsonSerializer.Deserialize<ServerHello>(response.ToArray(), Protocol.Json);
+            if (greeting?.Type != "serverHello")
                 throw new InvalidDataException("Missing Admin greeting.");
+            // Updated clients only publish themselves to an updated, signed-in
+            // Admin. Legacy clients skip this check and remain fully compatible.
+            if (hello.ProtocolVersion >= Protocol.CurrentProtocolVersion &&
+                (greeting.ProtocolVersion < Protocol.CurrentProtocolVersion || !greeting.Authenticated))
+                throw new InvalidDataException(greeting.Authenticated
+                    ? "Admin software is out of date. Update Admin.exe to accept this client."
+                    : "Admin dashboard is not signed in.");
         }
         log($"Connected to Admin {server.InstanceId} through {server.Host}:{server.Port}.");
         try { await session(socket, sendGate, lifetime.Token); }

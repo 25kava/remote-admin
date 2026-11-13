@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\RemoteAdmin.Shared\RemoteAdmin.Shared.csproj" />
     <EmbeddedResource Include="wwwroot\index.html" />
+    <EmbeddedResource Include="wwwroot\login.html" />
     <EmbeddedResource Include="wwwroot\screen.js" />
   </ItemGroup>
 

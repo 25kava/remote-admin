@@ -1,13 +1,28 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
+using RemoteAdmin;
 using RemoteAdmin.Shared;
 
-public sealed class DeviceHub(Action<string> log)
+public sealed class DeviceHub(Action<string> log, AdminAuth? auth = null)
 {
     // The socket, send gate and device snapshot have one shared connection lifetime.
     private readonly ConcurrentDictionary<string, ClientConnection> clients = new();
     private readonly ConcurrentDictionary<Guid, BrowserConnection> browsers = new();
+
+    /// <summary>
+    /// Signs updated clients out when nobody is signed in to the dashboard.
+    /// Legacy clients stay connected because they cannot perform the new check.
+    /// </summary>
+    public void DisconnectSignedInClients()
+    {
+        foreach (var entry in clients)
+        {
+            if (!entry.Value.RequiresSignIn) continue;
+            if (((ICollection<KeyValuePair<string, ClientConnection>>)clients).Remove(entry))
+                entry.Value.Socket.Abort();
+        }
+    }
 
     public void MapEndpoints(WebApplication app)
     {
@@ -143,14 +158,30 @@ public sealed class DeviceHub(Action<string> log)
             if (hello is null || hello.Type != "clientHello" || string.IsNullOrWhiteSpace(hello.DeviceId)) return;
             id = hello.DeviceId;
             var ip = context.Connection.RemoteIpAddress?.ToString() ?? hello.IpAddress;
+
+            // A client that understands the login gate refuses to publish itself
+            // to a signed-out Admin. The same rule is enforced in the handshake
+            // so a stale discovery reply cannot race a dashboard logout.
+            var modernClient = hello.ProtocolVersion >= Protocol.CurrentProtocolVersion;
+            if (modernClient && auth is { IsAnySignedIn: false })
+            {
+                log($"Refused updated client {hello.ComputerName} ({id}) from {ip}: Admin is not signed in.");
+                await socket.SendAsync(
+                    JsonSerializer.SerializeToUtf8Bytes(new ServerHello("serverHello",
+                        "Admin is not signed in.", Protocol.CurrentProtocolVersion, false), Protocol.Json),
+                    WebSocketMessageType.Text, true, handshake.Token);
+                return;
+            }
+
             client = new ClientConnection(socket, new(id, hello.ComputerName, hello.ComputerName,
-                "Connected", DateTime.UtcNow, ip, null, hello.ScreenStreamingSupported, hello.RemoteControlSupported));
+                "Connected", DateTime.UtcNow, ip, null, hello.ScreenStreamingSupported, hello.RemoteControlSupported), modernClient);
             ClientConnection? previous = null;
             clients.AddOrUpdate(id, client, (_, old) => { previous = old; return client; });
             // Abort does not race a second ReceiveAsync/CloseAsync on the previous socket.
             previous?.Socket.Abort();
-            log($"Client connected: {hello.ComputerName} ({id}) from {ip}.");
-            await SendRaw(socket, JsonSerializer.SerializeToUtf8Bytes(new ServerHello("serverHello", null), Protocol.Json),
+            log($"Client connected: {hello.ComputerName} ({id}) from {ip} (protocol {hello.ProtocolVersion}, legacy: {!modernClient}).");
+            await SendRaw(socket, JsonSerializer.SerializeToUtf8Bytes(new ServerHello("serverHello", null,
+                Protocol.CurrentProtocolVersion, auth?.IsAnySignedIn ?? true), Protocol.Json),
                 client.SendGate, handshake.Token);
 
             while (socket.State == WebSocketState.Open)
@@ -282,11 +313,12 @@ public sealed class DeviceHub(Action<string> log)
         finally { gate.Release(); }
     }
 
-    private sealed class ClientConnection(WebSocket socket, DeviceSnapshot snapshot)
+    private sealed class ClientConnection(WebSocket socket, DeviceSnapshot snapshot, bool requiresSignIn)
     {
         private readonly object gate = new();
         private DeviceSnapshot snapshot = snapshot;
         public WebSocket Socket { get; } = socket;
+        public bool RequiresSignIn { get; } = requiresSignIn;
         // Do not dispose while an already accepted browser send may still reference it.
         public SemaphoreSlim SendGate { get; } = new(1, 1);
         public DeviceSnapshot Snapshot => Volatile.Read(ref snapshot);
